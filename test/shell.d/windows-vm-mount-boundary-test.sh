@@ -1,16 +1,32 @@
 #!/bin/bash
-# Exercise the real EUID-0/PKEXEC_UID boundary in an isolated user+mount namespace.
+# Exercise the real EUID-0/PKEXEC_UID boundary in an isolated mount namespace.
 
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-if ((EUID != 0)); then
-  if unshare --user --map-auto --map-root-user --mount true 2>/dev/null; then
-    exec unshare --user --map-auto --map-root-user --mount --propagation private bash "$0"
+# The tmpfs mounts below shadow /run, /var and /home, so they must never land
+# on the host: real root once left the suite's own checkout hidden under them.
+# An unprivileged caller becomes root through a user namespace; real root only
+# needs a private mount namespace. The marker stops the re-exec from repeating
+# once inside it.
+if [[ ${OMARCHY_WINDOWS_BOUNDARY_TEST_NAMESPACE:-0} != 1 ]]; then
+  if ((EUID != 0)); then
+    isolate=(unshare --user --map-auto --map-root-user --mount --propagation private)
+    unavailable="automatic subordinate-id namespace unavailable"
+  else
+    isolate=(unshare --mount --propagation private)
+    unavailable="private mount namespace unavailable as root"
   fi
-  pass "automatic subordinate-id namespace unavailable; skipping root Windows VM boundary probe"
-  exit 0
+
+  if "${isolate[@]}" true 2>/dev/null; then
+    exec env OMARCHY_WINDOWS_BOUNDARY_TEST_NAMESPACE=1 "${isolate[@]}" bash "$0"
+  else
+    pass "$unavailable; skipping root Windows VM boundary probe"
+    exit 0
+  fi
 fi
+
+((EUID == 0)) || fail "root Windows VM boundary probe is not root inside its namespace"
 
 test_tmp=$(mktemp -d)
 trap 'rm -rf "$test_tmp"' EXIT
@@ -33,8 +49,9 @@ unset OMARCHY_WINDOWS_DIR
 set -- help
 source "$test_tmp/omarchy-windows-vm" >/dev/null 2>&1
 
-# The namespace maps the host filesystem's uid 0 to nobody. Only / remains on
-# that filesystem; all paths the helper mutates are isolated tmpfs mounts.
+# An unprivileged run's user namespace maps the host filesystem's uid 0 to
+# nobody. Only / remains on that filesystem; all paths the helper mutates are
+# isolated tmpfs mounts.
 stat() {
   if [[ ${!#} == / && $* == *"%u"* ]]; then printf '0\n'; return; fi
   command stat "$@"
