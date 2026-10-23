@@ -4,16 +4,53 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+# Real root cannot exercise the non-root development path as uid 0: sourcing
+# the helper with EUID 0 takes the privileged dispatch, which demands
+# PKEXEC_UID. Mapping root to another uid inside the user namespace does not
+# help either: a single-uid map presents every root-owned host file, / among
+# them, as owned by that uid, so the symlink-to-/ rejections stop firing.
+# Root therefore drops to a real unprivileged account and then isolates itself
+# like any other caller. resolve_caller looks the uid up in the account
+# database and insists on an existing home directory before the test's own
+# HOME takes over, so the account must be a real one; the user behind sudo
+# comes first because the checkout is readable to them.
+unprivileged_account() {
+  local uid gid home _
+  while IFS=: read -r _ _ uid gid _ home _; do
+    if (( uid > 0 )) && [[ -d $home ]]; then
+      printf '%s:%s\n' "$uid" "$gid"
+      return 0
+    fi
+  done < <(getent passwd "${SUDO_UID:-0}" || true; getent passwd)
+  return 1
+}
+
 # Bind mounts need CAP_SYS_ADMIN in a private mount namespace. Keep the
-# caller's uid so the non-root development path is exercised.
+# caller's uid so the non-root development path is exercised. The marker stops
+# the re-exec from repeating once inside.
 if [[ ${OMARCHY_WINDOWS_TEST_NAMESPACE:-0} != 1 ]]; then
-  if unshare --user --map-current-user --keep-caps --mount true 2>/dev/null; then
-    exec env OMARCHY_WINDOWS_TEST_NAMESPACE=1 \
-      unshare --user --map-current-user --keep-caps --mount --propagation private bash "$0"
+  isolate=(unshare --user --map-current-user --keep-caps --mount --propagation private)
+  if ((EUID != 0)); then
+    unavailable="unprivileged mount namespaces unavailable"
+  elif account=$(unprivileged_account); then
+    isolate=(setpriv --reuid="${account%:*}" --regid="${account#*:}" --clear-groups "${isolate[@]}")
+    unavailable="uid ${account%:*} cannot run this file in an unprivileged mount namespace"
+  else
+    pass "no unprivileged account for root to drop to; skipping Windows VM mount runtime tests"
+    exit 0
   fi
-  pass "unprivileged mount namespaces unavailable; skipping Windows VM mount runtime tests"
-  exit 0
+
+  # Probe by reading this file as the caller the test will run as, so a
+  # checkout the borrowed account cannot reach skips instead of failing.
+  if "${isolate[@]}" bash -n "$0" 2>/dev/null; then
+    exec env OMARCHY_WINDOWS_TEST_NAMESPACE=1 "${isolate[@]}" bash "$0"
+  else
+    pass "$unavailable; skipping Windows VM mount runtime tests"
+    exit 0
+  fi
 fi
+
+((EUID != 0)) || fail "Windows VM mount runtime tests are still root inside their namespace"
 
 TMPDIR=$(mktemp -d)
 export OMARCHY_WINDOWS_DIR="$TMPDIR/win"
