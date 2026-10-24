@@ -30,6 +30,8 @@ Nothing verifies the commits the checkout fast-forwards to: no signature is chec
 
 A channel change on a Pi keeps this `omarchy` pair, since `[omarchy]`'s `-dev` pair for edge doesn't know the Pi, so a Pi on edge reads as edge from its mirrors alone. `omarchy channel set dev` on a Pi clones Pimarchy into `~/omarchy` from the upstream of the branch checked out in `/var/lib/pimarchy/src`, and refuses an existing `~/omarchy` without the Pi's templates as not Pimarchy. Between updates, the bar's update indicator compares the commit the Pi last built with the tip of that branch.
 
+Anything that rewrites a Pi's `pacman.conf` has to keep `[pimarchy]` first, or `[omarchy]`'s builds replace the Pi's at the next update. Migration 1791403252, which moves `[omarchy]` to the front of every `pacman.conf`, predates the Pi: owner setup marks every migration the image ships as done for the account it creates (`omarchy-provision-user --first-install`), so it never runs on a Pi.
+
 The `omarchy` and `omarchy-settings` PKGBUILDs in `pi/pkgbuilds/` are upstream's, vendored from `omacom/omarchy-pkgs`; `pi/pkgbuilds/README.md` records the source and any local change.
 
 ## Boot chain
