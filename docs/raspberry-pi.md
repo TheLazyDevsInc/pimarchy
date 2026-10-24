@@ -4,7 +4,7 @@ How Omarchy runs on a Raspberry Pi: the `aarch64-rpi` platform family, the Pi fi
 
 ## Status
 
-Everything here is covered by the shell suite and by an emulated image build (`pi/build-image`, run on an x86_64 host under proot and qemu-user). None of it has been booted on a Pi 400 yet. The checklist at the end is what a first hardware run has to confirm.
+Everything here is covered by the shell suite, by full image builds on an x86_64 host (`pi/build-image` in a binfmt_misc chroot through qemu-user 10, about an hour each), and by booting a built image in QEMU's `raspi4b` machine with the Pi 400's device tree ([`pi/README.md`](../pi/README.md), Booting an image under QEMU). Under emulation, the image's first boot grew the root to fill the card, ran the deferred hardware setup (the pacman keyring, every queued leaf, the boot files) and rebuilt the initramfs on the device; `update-verify` passed; a second boot from that initramfs skipped first-boot setup with no unit failing; and the owner wizard waited on tty1 both times. QEMU emulates no GPU, USB, network, Wi-Fi or Bluetooth for this board, so nothing from the owner wizard on has run, and none of it has run on a Pi 400 yet. The checklist at the end is what a first hardware run has to confirm.
 
 ## Platform
 
