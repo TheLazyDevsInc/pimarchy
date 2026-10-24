@@ -4,6 +4,14 @@
 
 [Asahi Alarm](https://asahi-alarm.org/) is a version of Arch for Apple M1/M2 computers built on top of [Asahi Linux](https://asahilinux.org/). You can get Omarchy running on top of that with some effort. See [the user-driven guide](https://github.com/omarchy-mac/omarchy-mac).
 
+### Raspberry Pi 400
+
+This fork, Pimarchy, runs Omarchy on the Raspberry Pi 400. You build an SD card image on another computer with `pi/build-image`, flash it, and boot: the Pi grows the card's root partition, sets up its hardware, and asks for your keyboard layout, account, hostname and timezone before logging you into Hyprland. The `pi/README.md` file in the [Pimarchy repository](https://github.com/TheLazyDevsInc/pimarchy) walks through building and flashing it.
+
+A few things work differently from a laptop or desktop. The Pi boots its own firmware instead of Limine, so there are no boot-menu snapshots, no disk encryption and no hibernation, and Suspend is hidden because the Pi can't sleep. Sound plays over HDMI, since the Pi 400 has no headphone jack. `omarchy update` also rebuilds Omarchy's own packages on the Pi from its Pimarchy checkout, which adds a minute or two when something changed.
+
+The Pi 400 support is new and hasn't been through a full test on the hardware yet.
+
 ### Apple Virtual Machine
 
 You can also install Omarchy inside a Parallels VM. Quite the cumbersome process, but there's [a user-driven guide](https://github.com/omacom/omarchy/discussions/452) for that too.
