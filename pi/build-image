@@ -348,7 +348,7 @@ check_prerequisites() {
   done
 
   if [[ $runner == "proot" ]] && command -v proot >/dev/null && ! proot_works; then
-    problems+=("proot ${proot_version:-(which prints no version)} does not translate faccessat2, which Arch Linux ARM's glibc uses: install proot 5.4 or newer (Arch: extra/proot; Debian 13: proot; elsewhere unpack Debian's proot_5.4.0 .deb, see pi/README.md)")
+    problems+=("proot ${proot_version:-(which prints no version)} does not translate faccessat2, which Arch Linux ARM's glibc uses: install proot 5.4 or newer (Arch: proot from the AUR; elsewhere unpack Debian forky's or sid's proot_5.4.0 .deb, which needs glibc 2.38, see pi/README.md), or use the chroot runner")
   fi
 
   if command -v mke2fs >/dev/null; then
