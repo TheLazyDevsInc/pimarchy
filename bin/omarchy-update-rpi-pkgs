@@ -1,0 +1,301 @@
+#!/bin/bash -p
+
+# omarchy:summary=Build Omarchy's packages for this Raspberry Pi from its Pimarchy checkout into its local repository
+# omarchy:args=[--init] [--as-user <user>]
+# omarchy:hidden=true
+# omarchy:requires-sudo=true
+
+# A Raspberry Pi installs omarchy, omarchy-settings and its boot package from
+# [pimarchy], a local repository its pacman templates list ahead of [omarchy]
+# (default/pacman/aarch64-rpi), because upstream's aarch64 builds don't know the
+# Pi. The packages are built here, from the Pi's own Pimarchy checkout
+# (docs/raspberry-pi.md, pi/pkgbuilds/README.md).
+#
+# --init only makes sure the repository exists, with an empty database if need
+# be: pacman refuses to sync a file:// repository without one, so everything
+# that installs the Pi's templates runs this first. Without it, this also
+# fast-forwards the checkout and, when it has moved since the last build,
+# builds the three packages from its pi/pkgbuilds/ and publishes them, which
+# omarchy update does before its package transaction.
+#
+# The repository and the checkout belong to root, but makepkg refuses to build
+# as root. Run as a user, this builds as that user and reaches root through
+# sudo, which omarchy update has already authorized. Run as root, it builds as
+# the user sudo ran it for, or as the user --as-user names, through runuser.
+# The PKGBUILDs come from the root-owned checkout, the same code the packages
+# install, so building them while the update holds sudo trusts nothing new.
+
+# -p keeps a root caller's environment from running code in this shell before
+# the first line (bash ignores BASH_ENV and exported functions), so a launch
+# without it is refused.
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+set -euo pipefail
+
+# Root decides what it builds and publishes with a fixed PATH: a dev link puts
+# a user-writable checkout's bin/ on sudo's secure_path. The platform predicate
+# is the one shipped beside this file.
+if (( EUID == 0 )); then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+fi
+here=${BASH_SOURCE[0]%/*}
+[[ $here != "${BASH_SOURCE[0]}" ]] || here=.
+
+usage() {
+  echo "Usage: omarchy-update-rpi-pkgs [--init] [--as-user <user>]" >&2
+  exit 2
+}
+
+init_only=0
+as_user=""
+while (( $# > 0 )); do
+  case $1 in
+    --init)
+      init_only=1
+      ;;
+    --as-user)
+      (( $# > 1 )) || usage
+      as_user=$2
+      shift
+      ;;
+    *)
+      usage
+      ;;
+  esac
+  shift
+done
+
+# Only a Raspberry Pi has the local repository.
+"$here/omarchy-hw-aarch64-rpi" || exit 0
+
+pimarchy=/var/lib/pimarchy
+repo=$pimarchy/repo
+src=$pimarchy/src
+db=$repo/pimarchy.db.tar.gz
+built_commit=$repo/.built-commit
+# A Pi's /tmp lives in its RAM; a build copies the whole tree more than once.
+scratch=/var/tmp
+packages=(omarchy-settings omarchy omarchy-rpi-boot)
+
+# pacman downloads as its alpm user, which has to read what root writes here.
+umask 022
+
+warn() {
+  echo -e "\e[33m$*\e[0m" >&2
+}
+
+die() {
+  echo -e "\e[31mError: $*\e[0m" >&2
+  exit 1
+}
+
+as_root() {
+  if (( EUID == 0 )); then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+# The repository is valid once pimarchy.db, the link pacman reads, resolves.
+init_repo() {
+  [[ ! -e $repo/pimarchy.db ]] || return 0
+
+  echo "Create the local package repository $repo"
+  as_root install -d -m 0755 "$pimarchy" "$repo"
+  if [[ -e $db ]]; then
+    # Only the link went missing: lay it out the way repo-add does.
+    as_root ln -sfn "${db##*/}" "$repo/pimarchy.db"
+  else
+    # Given no packages, repo-add writes an empty database and its links.
+    as_root repo-add --quiet "$db"
+  fi
+  [[ -e $repo/pimarchy.db ]] || die "$repo has no pimarchy.db after creating it."
+}
+
+init_repo
+(( ! init_only )) || exit 0
+
+[[ -e $src/.git ]] || die "There is no Pimarchy checkout at $src to build Omarchy's packages from."
+
+current_user=$(id -un)
+if [[ -n $as_user ]]; then
+  builder=$as_user
+elif (( EUID == 0 )); then
+  builder=${SUDO_USER:-}
+else
+  builder=$current_user
+fi
+[[ -n $builder ]] || die "makepkg doesn't build as root. Run this as a user, through sudo, or with --as-user <user>."
+builder_uid=$(id -u -- "$builder" 2>/dev/null) || die "There is no user $builder to build as."
+(( builder_uid != 0 )) || die "makepkg doesn't build as root. Name another user with --as-user <user>."
+
+as_builder() {
+  if [[ $builder == "$current_user" ]]; then
+    "$@"
+  elif (( EUID == 0 )); then
+    runuser -u "$builder" -- "$@"
+  else
+    sudo runuser -u "$builder" -- "$@"
+  fi
+}
+
+# Git refuses to read a repository someone else owns, so even its queries run
+# as root.
+src_git() {
+  as_root git -C "$src" "$@"
+}
+
+# The pkgver= a PKGBUILD sets, when it is a plain version.
+pkgbuild_pkgver() {
+  local line value
+
+  [[ -f $1 ]] || return 1
+  line=$(grep -m1 '^pkgver=' -- "$1") || return 1
+  value=${line#pkgver=}
+  value=${value//[\"\']/}
+  [[ $value =~ ^[[:alnum:]._+]+$ ]] || return 1
+  echo "$value"
+}
+
+# The PKGBUILD with pkgver=$2 and without a pkgver() function that would
+# replace it, the way omarchy-dev-pkg-test versions its builds.
+pkgbuild_with_version() {
+  awk -v version="$2" '
+    /^pkgver\(\)[[:space:]]*\{/ {
+      in_pkgver = 1
+      depth = 0
+    }
+    in_pkgver {
+      line = $0
+      opens = gsub(/\{/, "{", line)
+      line = $0
+      closes = gsub(/\}/, "}", line)
+      depth += opens - closes
+      if (depth <= 0) {
+        in_pkgver = 0
+      }
+      next
+    }
+    /^pkgver=/ {
+      print "pkgver=" version
+      next
+    }
+    { print }
+  ' "$1"
+}
+
+echo -e "\e[32m\nUpdate Omarchy's Raspberry Pi packages\e[0m"
+
+# Fast-forward only. Local changes or local commits are someone's work: leave
+# them, say so, and build what is there.
+before=$(src_git rev-parse --short HEAD)
+if ! upstream=$(src_git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
+  warn "The Pimarchy checkout at $src follows no upstream branch; building what is there."
+elif ! src_git fetch --quiet; then
+  warn "Could not fetch $upstream for the Pimarchy checkout; building what is there."
+elif [[ -n $(src_git status --porcelain --untracked-files=no) ]]; then
+  warn "The Pimarchy checkout at $src has local changes; building what is there."
+elif ! src_git merge --ff-only --quiet "$upstream" 2>/dev/null; then
+  warn "The Pimarchy checkout at $src cannot fast-forward to $upstream; building what is there."
+fi
+
+head=$(src_git rev-parse HEAD)
+short=$(src_git rev-parse --short HEAD)
+count=$(src_git rev-list --count HEAD)
+if [[ $short == "$before" ]]; then
+  echo "Pimarchy checkout at $short"
+else
+  echo "Pimarchy checkout moved from $before to $short"
+fi
+
+# Every package is versioned by the checkout it was built from, the way Arch
+# versions VCS packages, so each build upgrades the last one.
+declare -A version
+for pkg in "${packages[@]}"; do
+  base=$(pkgbuild_pkgver "$src/pi/pkgbuilds/$pkg/PKGBUILD") ||
+    die "$src/pi/pkgbuilds/$pkg/PKGBUILD sets no plain pkgver to build $pkg from."
+  version[$pkg]=$base.r$count.g$short
+done
+# omarchy depends on omarchy-settings of exactly its own version.
+[[ ${version[omarchy]} == "${version[omarchy-settings]}" ]] ||
+  die "omarchy and omarchy-settings set different pkgver values in $src/pi/pkgbuilds; they must match."
+
+published() {
+  local pkg
+  local -a files
+  for pkg in "${packages[@]}"; do
+    files=("$repo/$pkg-${version[$pkg]}"-*.pkg.tar.*)
+    [[ -f ${files[0]} ]] || return 1
+  done
+}
+
+built=""
+if [[ -f $built_commit ]]; then
+  read -r built <"$built_commit" || true
+fi
+if [[ $built == "$head" ]] && published; then
+  echo "Omarchy's Raspberry Pi packages are up to date."
+  exit 0
+fi
+
+work=""
+cleanup() {
+  if [[ -n $work ]]; then
+    as_builder rm -rf -- "$work"
+  fi
+}
+trap cleanup EXIT
+
+work=$(as_builder mktemp -d -p "$scratch" pimarchy-pkgs.XXXXXXXX)
+# Root, or a caller building as someone else, collects the results from here.
+as_builder chmod 0755 "$work"
+as_builder mkdir "$work/out"
+
+for pkg in "${packages[@]}"; do
+  echo "Build $pkg ${version[$pkg]}"
+  as_builder mkdir "$work/$pkg"
+  as_builder cp -a -- "$src/pi/pkgbuilds/$pkg/." "$work/$pkg/"
+  pkgbuild_with_version "$src/pi/pkgbuilds/$pkg/PKGBUILD" "${version[$pkg]}" |
+    as_builder tee "$work/$pkg/PKGBUILD" >/dev/null
+  # --nodeps: omarchy needs omarchy-settings of the version being built, which
+  # no repository has yet, and pacman installs every runtime dependency when the
+  # update's transaction installs these. What the build itself runs (git,
+  # imagemagick, base-devel) is in every Omarchy install's base set. The
+  # destinations are set here so the builder's own makepkg.conf can't move
+  # them; zstd compresses far faster than xz on a Pi.
+  if ! as_builder env -C "$work/$pkg" \
+    OMARCHY_SRC="$src" PKGDEST="$work/out" BUILDDIR="$work/build" SRCDEST="$work/sources" PKGEXT=.pkg.tar.zst \
+    makepkg --nodeps --noconfirm; then
+    die "Building $pkg failed. $repo is unchanged."
+  fi
+done
+
+built_files=()
+for pkg in "${packages[@]}"; do
+  files=("$work/out/$pkg-${version[$pkg]}"-*.pkg.tar.*)
+  [[ -f ${files[0]} ]] || die "makepkg left no $pkg ${version[$pkg]} package. $repo is unchanged."
+  built_files+=("${files[@]}")
+done
+
+repo_files=()
+added=()
+for file in "${built_files[@]}"; do
+  repo_files+=("$repo/${file##*/}")
+  [[ -e $repo/${file##*/} ]] || added+=("$repo/${file##*/}")
+done
+
+echo "Publish them to $repo"
+as_root install -m 0644 -- "${built_files[@]}" "$repo/"
+# --remove deletes each package's previous file once the database drops it.
+if ! as_root repo-add --remove --quiet "$db" "${repo_files[@]}"; then
+  if (( ${#added[@]} > 0 )); then
+    as_root rm -f -- "${added[@]}"
+  fi
+  die "repo-add could not publish the packages. $repo is unchanged."
+fi
+as_root tee "$built_commit" >/dev/null <<<"$head"
+echo "Omarchy's Raspberry Pi packages are built from $short."
