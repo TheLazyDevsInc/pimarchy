@@ -1177,8 +1177,11 @@ build_local_packages() {
 
   for package in "${local_packages[@]}"; do
     entry=$(repo_package "$package") || fail "the local repository has no $package"
-    if [[ ! $entry =~ \.r$commit_count\.g([0-9a-f]+)-[0-9]+$ || $commit != "${BASH_REMATCH[1]}"* ]]; then
-      fail "the local repository's $entry is not versioned for $commit (.r$commit_count.g${commit:0:7})"
+    # The serial is the commit count, or past it when a retried run published
+    # once already (omarchy-update-rpi-pkgs never reuses a serial).
+    if [[ ! $entry =~ \.r([0-9]+)\.g([0-9a-f]+)-[0-9]+$ ]] || (( 10#${BASH_REMATCH[1]} < commit_count )) ||
+      [[ $commit != "${BASH_REMATCH[2]}"* ]]; then
+      fail "the local repository's $entry is not versioned for $commit (.r$commit_count.g${commit:0:7} or a later serial)"
     fi
     echo "[pimarchy] $entry"
   done
@@ -1552,6 +1555,8 @@ root_problems() (
   [[ $(host_git -C "$root$guest_src" symbolic-ref --short HEAD 2>/dev/null) == "$branch" ]] || problem "$guest_src is not on branch $branch"
   [[ $(host_git -C "$root$guest_src" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) == "origin/$branch" ]] ||
     problem "$guest_src's branch does not track origin/$branch, so the Pi would never fetch it"
+  [[ -z $(host_git -C "$root$guest_src" status --porcelain --untracked-files=no 2>/dev/null) ]] ||
+    problem "$guest_src has uncommitted changes, so the Pi would never update or build it"
 
   # Sealing.
   [[ -f $root/etc/machine-id && ! -s $root/etc/machine-id ]] || problem "/etc/machine-id is not empty"

@@ -368,6 +368,10 @@ else
   expect_problem "a checkout whose branch tracks nothing is refused" "does not track origin/$branch"
   git -C "$checkout" update-ref "refs/remotes/origin/$branch" "$commit"
 
+  printf 'edited\n' >>"$checkout/bin/omarchy"
+  expect_problem "a checkout with uncommitted changes is refused" "$guest_src has uncommitted changes"
+  git -C "$checkout" checkout -q -- bin/omarchy
+
   mkdir "$root/etc/pacman.d/gnupg"
   expect_problem "a root that keeps the build's keyring is refused" "the build's pacman keyring is still in the image"
   rmdir "$root/etc/pacman.d/gnupg"
