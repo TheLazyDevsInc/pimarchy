@@ -3,7 +3,26 @@
 # omarchy:summary=Install one of the supported databases in a Docker container with the suitable development options.
 # omarchy:requires-sudo=true
 
-options=("MySQL" "PostgreSQL" "Redis" "MongoDB" "MariaDB" "MSSQL")
+options=("MySQL" "PostgreSQL" "Redis")
+# MongoDB's ARM builds need ARMv8.2-A, and a Pi 4 or 400's Cortex-A72 is
+# ARMv8.0, so its server would die on an illegal instruction.
+if ! omarchy-hw-aarch64-rpi; then
+  options+=("MongoDB")
+fi
+options+=("MariaDB")
+# Microsoft publishes SQL Server images for x86_64 only.
+if omarchy-hw-x86; then
+  options+=("MSSQL")
+fi
+
+offered() {
+  local option
+
+  for option in "${options[@]}"; do
+    [[ $option == "$1" ]] && return 0
+  done
+  return 1
+}
 
 if (( $# == 0 )); then
   choices=$(printf "%s\n" "${options[@]}" | gum choose --header "$(omarchy-i18n docker.selectDatabase)") || main_menu
@@ -13,6 +32,11 @@ fi
 
 if [[ -n $choices ]]; then
   for db in $choices; do
+    if [[ $db == "MongoDB" || $db == "MSSQL" ]] && ! offered "$db"; then
+      echo "Skipping $db: its image does not run on this computer's processor."
+      continue
+    fi
+
     echo "Installing $db..."
     case $db in
     MySQL) sudo docker run -d --restart unless-stopped -p "127.0.0.1:3306:3306" --name=mysql8 -e MYSQL_ROOT_PASSWORD= -e MYSQL_ALLOW_EMPTY_PASSWORD=true mysql:8.4 ;;

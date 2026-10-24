@@ -134,3 +134,32 @@ run x86 "$ROOT/bin/omarchy-update-firmware" >/dev/null 2>&1 || true
 grep -Fxq 'omarchy-pkg-add fwupd' "$CALL_LOG" || fail "fwupd is still installed when it is missing" "$(<"$CALL_LOG")"
 mv "$scratch/fwupdmgr.off" "$stub_bin/fwupdmgr"
 pass "other machines update firmware through fwupd as before"
+
+# omarchy-install-docker-dbs: SQL Server on x86 only, MongoDB everywhere but the
+# Pi. gum records the choices it was offered and picks none.
+export OFFERED="$scratch/offered"
+cat >"$stub_bin/gum" <<'SH'
+#!/bin/bash
+cat >"$OFFERED"
+SH
+cat >"$stub_bin/docker" <<'SH'
+#!/bin/bash
+printf 'docker %s\n' "${*: -1}" >>"$CALL_LOG"
+SH
+chmod +x "$stub_bin/gum" "$stub_bin/docker"
+offered() {
+  run "$1" "$ROOT/bin/omarchy-install-docker-dbs" >/dev/null
+  paste -sd ' ' "$OFFERED"
+}
+[[ $(offered x86) == "MySQL PostgreSQL Redis MongoDB MariaDB MSSQL" ]] || fail "x86 offers every database, in order" "$(offered x86)"
+[[ $(offered arm) == "MySQL PostgreSQL Redis MongoDB MariaDB" ]] || fail "ARM offers no SQL Server, which has no ARM image" "$(offered arm)"
+[[ $(offered pi400) == "MySQL PostgreSQL Redis MariaDB" ]] || fail "a Pi offers neither SQL Server nor MongoDB" "$(offered pi400)"
+
+output=$(run pi400 "$ROOT/bin/omarchy-install-docker-dbs" MongoDB MSSQL Redis)
+[[ $(<"$CALL_LOG") == $'sudo docker run -d --restart unless-stopped -p 127.0.0.1:6379:6379 --name=redis redis:7\ndocker redis:7' ]] ||
+  fail "a Pi asked for MongoDB and SQL Server by name starts only the databases it can run" "$(<"$CALL_LOG")"
+[[ $output == *"Skipping MongoDB"* && $output == *"Skipping MSSQL"* ]] || fail "a Pi says why it skipped them" "$output"
+run x86 "$ROOT/bin/omarchy-install-docker-dbs" MongoDB MSSQL >/dev/null
+grep -Fxq 'docker mongo:noble' "$CALL_LOG" && grep -Fxq 'docker mcr.microsoft.com/mssql/server:2022-CU12-ubuntu-22.04' "$CALL_LOG" ||
+  fail "x86 still starts MongoDB and SQL Server" "$(<"$CALL_LOG")"
+pass "Docker databases are offered only where their images run"
