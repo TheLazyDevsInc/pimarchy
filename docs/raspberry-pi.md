@@ -44,13 +44,18 @@ The Pi registers a platform boot package with `omarchy-lifecycle-dispatch`, as A
 
 `install/hardware/rpi/` holds the Pi's leaves, each gated on the family or the Pi 400:
 
-- **Audio.** The Pi 400 has no 3.5 mm jack, but `snd_bcm2835` still registers a Headphones card, and WirePlumber ranks analogue outputs above HDMI. `options snd_bcm2835 enable_headphones=0` removes it, so sound goes to HDMI.
 - **Sleep.** The BCM2711 has no suspend-to-RAM, so suspend and hibernation are turned off and the menu hides Suspend, as on the GB10.
 - **Network.** Arch Linux ARM's stock systemd-networkd DHCP files are retired, as other machines' are, so NetworkManager owns the interfaces.
 - **Vulkan.** v3d is a device-tree platform device that `lspci` never sees, so `vulkan.sh` installs `vulkan-broadcom` by platform.
 - **Display scale.** A Pi drives HDMI monitors at 1x, so the user's `GDK_SCALE` starts at 1 instead of the shipped 2.
 
-What already works on a Pi without a branch of its own: Hyprland (Aquamarine opens only KMS cards, so it scans out on vc4 and renders on v3d), the monitor panel's two external outputs, DDC brightness (failures are cached), power profiles (the placeholder driver offers balanced and power-saver), the hidden power panel with no battery, and Bluetooth on the UART.
+What already works on a Pi without a branch of its own:
+
+- **Hyprland.** Aquamarine opens only KMS cards, so it scans out on vc4 and renders on v3d. Hyprland asks for GLES 3.2 and falls back to 3.0, which Mesa's v3d (GLES 3.1) gives it; only custom screen shaders written for `#version 320 es` won't compile.
+- **Audio.** The Pi 400 has no 3.5 mm jack. Its device tree already passes `snd_bcm2835.enable_headphones=0` on the kernel command line, and the vc4 KMS overlay turns off the firmware's HDMI audio, so the only sound cards are vc4's two HDMI outputs.
+- **Bluetooth.** The radio is a serial-device child of the PL011 UART, so the kernel's `hci_uart` attaches it with no service, and `firmware-raspberrypi` supplies `BCM4345C5.hcd`. Wi-Fi is the CYW43456, whose firmware also comes from `firmware-raspberrypi`.
+- **The power key.** Fn+F10 sends `KEY_POWER`, which opens Omarchy's power menu, and shutdown cuts power through the board's poweroff GPIO.
+- **Displays, brightness and power.** The monitor panel shows both HDMI outputs, DDC brightness works where the monitor supports it (failures are cached), power profiles fall back to the placeholder driver's balanced and power-saver, and the power panel hides itself with no battery.
 
 ## What is off, and why
 
