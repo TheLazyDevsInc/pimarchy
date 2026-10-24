@@ -8,11 +8,13 @@
 omarchy_pacman_templates() {
   case ${1:-} in
     x86) echo "$OMARCHY_PATH/default/pacman" ;;
-    aarch64 | aarch64-apple) echo "$OMARCHY_PATH/default/pacman/$1" ;;
-    # Snapdragon, the N1x, the GB10 and the Pi use Arch Linux ARM and Omarchy's
-    # aarch64 repository like any other ARM machine, so they share its templates.
-    # The Pi's kernel and firmware come from Arch Linux ARM's [alarm].
-    aarch64-qualcomm | aarch64-n1x | aarch64-gb10 | aarch64-rpi) echo "$OMARCHY_PATH/default/pacman/aarch64" ;;
+    # The Pi's own templates add the local [pimarchy] repository of Omarchy
+    # packages built from its Pimarchy checkout ahead of [omarchy]
+    # (docs/raspberry-pi.md). Its kernel and firmware come from [alarm].
+    aarch64 | aarch64-apple | aarch64-rpi) echo "$OMARCHY_PATH/default/pacman/$1" ;;
+    # Snapdragon, the N1x and the GB10 use Arch Linux ARM and Omarchy's aarch64
+    # repository like any other ARM machine, so they share its templates.
+    aarch64-qualcomm | aarch64-n1x | aarch64-gb10) echo "$OMARCHY_PATH/default/pacman/aarch64" ;;
     *)
       echo "Error: Unknown platform '${1:-}'." >&2
       return 1

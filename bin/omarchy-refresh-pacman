@@ -67,6 +67,12 @@ cleanup_refresh() {
 trap cleanup_refresh EXIT
 "$OMARCHY_PATH/bin/omarchy-apply-pacman" --render "$channel" "$rendered"
 
+# The Pi's templates name its local repository, and pacman refuses to sync a
+# file:// repository that has no database, so make sure it exists first.
+if [[ $platform == "aarch64-rpi" ]]; then
+  omarchy-update-rpi-pkgs --init
+fi
+
 sudo cp -f /etc/pacman.conf /etc/pacman.conf.bak
 sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
 echo "Setting channel to $channel"

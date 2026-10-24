@@ -15,7 +15,7 @@ trap 'rm -rf "$work"' EXIT
 export OMARCHY_PATH="$ROOT"
 source "$ROOT/install/helpers/pacman.sh"
 
-platforms="x86 aarch64 aarch64-apple"
+platforms="x86 aarch64 aarch64-apple aarch64-rpi"
 # Apple Silicon has edge alone: its packages and Asahi ALARM are published for
 # edge only so far.
 channels_for() {
@@ -27,12 +27,28 @@ channels_for() {
 [[ $(omarchy_pacman_templates x86) == "$ROOT/default/pacman" ]] || fail "x86 keeps its templates where they were"
 [[ $(omarchy_pacman_templates aarch64) == "$ROOT/default/pacman/aarch64" ]] || fail "plain aarch64 uses the aarch64 templates"
 [[ $(omarchy_pacman_templates aarch64-apple) == "$ROOT/default/pacman/aarch64-apple" ]] || fail "Apple Silicon uses its own templates"
-for platform in aarch64-qualcomm aarch64-n1x aarch64-gb10 aarch64-rpi; do
+for platform in aarch64-qualcomm aarch64-n1x aarch64-gb10; do
   [[ $(omarchy_pacman_templates "$platform") == "$ROOT/default/pacman/aarch64" ]] || fail "$platform shares the aarch64 templates"
   [[ $(omarchy_pacman_default_channel "$platform") == stable ]] || fail "$platform defaults to stable"
 done
+[[ $(omarchy_pacman_templates aarch64-rpi) == "$ROOT/default/pacman/aarch64-rpi" ]] || fail "the Pi uses its own templates"
 ! omarchy_pacman_templates riscv 2>/dev/null || fail "an unknown platform has no templates"
 pass "each platform's templates sit in a directory of their own, x86_64's where they always were"
+
+# The Pi's local repository of Omarchy packages built from its checkout comes
+# before [omarchy], so pacman installs and upgrades those names from it.
+for channel in stable rc edge; do
+  conf="$ROOT/default/pacman/aarch64-rpi/pacman-$channel.conf"
+  [[ $(sed -n '/^\[pimarchy\]/,/^\[/s/^Server = //p' "$conf") == "file:///var/lib/pimarchy/repo" ]] ||
+    fail "the Pi's $channel template reads [pimarchy] from the local repository"
+  [[ $(sed -n '/^\[pimarchy\]/,/^\[/s/^SigLevel = //p' "$conf") == "Optional TrustAll" ]] ||
+    fail "the Pi's $channel template takes the local builds unsigned"
+  diff <(sed -n '/^\[omarchy\]/,$p' "$conf") <(sed -n '/^\[omarchy\]/,$p' "$ROOT/default/pacman/aarch64/pacman-$channel.conf") >/dev/null ||
+    fail "the Pi's $channel template matches aarch64's from [omarchy] on"
+  cmp -s "$ROOT/default/pacman/aarch64-rpi/mirrorlist-$channel" "$ROOT/default/pacman/aarch64/mirrorlist-$channel" ||
+    fail "the Pi's $channel mirrorlist is aarch64's"
+done
+pass "the Pi's templates are aarch64's with the local [pimarchy] repository first"
 
 for platform in x86 aarch64 aarch64-rpi; do
   [[ $(omarchy_pacman_default_channel "$platform") == stable ]] || fail "$platform defaults to stable"
@@ -63,6 +79,7 @@ for platform in $platforms; do
       x86) expected="omarchy core extra multilib " ;;
       aarch64) expected="omarchy core extra alarm " ;;
       aarch64-apple) expected="omarchy asahi-alarm core extra alarm " ;;
+      aarch64-rpi) expected="pimarchy omarchy core extra alarm " ;;
     esac
     [[ $list == "$expected" ]] || fail "$platform $channel: repositories in order" "$list"
     # $arch stays literal: pacman fills it in on the machine.
@@ -105,6 +122,12 @@ printf '#!/bin/bash\necho "$PLATFORM"\n' >"$finalize_bin/omarchy-hw-platform"
 for command in omarchy-pkg-add pacman-key; do
   printf '#!/bin/bash\nexit 0\n' >"$finalize_bin/$command"
 done
+# Records what pacman.conf held when the Pi's repository was made sure of: it
+# has to exist before the templates naming it are copied in.
+cat >"$finalize_bin/omarchy-update-rpi-pkgs" <<STUB
+#!/bin/bash
+printf '%s %s\n' "\$*" "\$(head -1 "$work/etc/pacman.conf")" >>"$work/rpi-pkgs.log"
+STUB
 chmod +x "$finalize_bin"/*
 # Finalization restores the templates through omarchy-apply-pacman, whose copy
 # here writes into the test's etc rather than the host's.
@@ -135,13 +158,21 @@ for platform in $platforms; do
     rm -rf "$work/etc"
     mkdir -p "$work/etc/pacman.d"
     printf 'offline\n' | tee "$work/etc/pacman.conf" >"$work/etc/pacman.d/mirrorlist"
+    : >"$work/rpi-pkgs.log"
     OMARCHY_PATH=$finalize_root OMARCHY_IMAGE_ROOT=$work OMARCHY_MIRROR=$channel PLATFORM=$platform OMARCHY_INSTALL="$work/install" PATH="$finalize_bin:$PATH" \
       bash -e -c 'source "$1"' bash "$work/finalize.sh" >/dev/null || fail "$platform finalization on '$channel'"
     cmp -s "$work/etc/pacman.conf" "$templates/pacman-$expected.conf" || fail "$platform '$channel': finalization copies the $expected template"
     cmp -s "$work/etc/pacman.d/mirrorlist" "$templates/mirrorlist-$expected" || fail "$platform '$channel': finalization copies the $expected mirrorlist"
+    if [[ $platform == "aarch64-rpi" ]]; then
+      [[ $(<"$work/rpi-pkgs.log") == "--init offline" ]] ||
+        fail "Pi '$channel': finalization creates the local repository before copying templates that name it" "$(<"$work/rpi-pkgs.log")"
+    else
+      [[ ! -s $work/rpi-pkgs.log ]] || fail "$platform '$channel': finalization leaves the Pi's repository alone"
+    fi
   done
 done
 pass "install finalization copies the platform's channel template and mirrorlist, or its default channel's when it has none for that channel"
+pass "install finalization on a Pi creates its local repository before the templates that name it"
 fi
 
 # ── refresh through the command, with every privileged step a stand-in ───────
@@ -169,16 +200,25 @@ for platform in $platforms; do
     x86) templates=$SUDO_TEST_ROOT/default/pacman ;;
     aarch64) templates=$SUDO_TEST_ROOT/default/pacman/aarch64 ;;
     aarch64-apple) templates=$SUDO_TEST_ROOT/default/pacman/aarch64-apple ;;
+    aarch64-rpi) templates=$SUDO_TEST_ROOT/default/pacman/aarch64-rpi ;;
   esac
   # No channel named refreshes to the platform's default one.
   for channel in $(channels_for "$platform") ""; do
     reset_boundary
     SUDO_TEST_PLATFORM=$platform refresh $channel || fail "$platform refreshes to '$channel'" "$(cat "$boundary_tmp/output")"
     [[ -n $channel ]] || channel=$(omarchy_pacman_default_channel "$platform")
-    python3 - "$SUDO_TEST_LOG" "$templates" "$channel" <<'PY'
+    python3 - "$SUDO_TEST_LOG" "$templates" "$channel" "$platform" <<'PY'
 import sys
 events = [e for e in open(sys.argv[1]).read().splitlines() if e not in ('sudo -h', 'sudo -k')]
-templates, channel = sys.argv[2:]
+templates, channel, platform = sys.argv[2:]
+# A Pi makes sure of its local repository before root copies in templates
+# naming it; nothing else has one.
+init = 'step:omarchy-update-rpi-pkgs --init'
+if platform == 'aarch64-rpi':
+  assert events.count(init) == 1, events
+  assert events.index(init) < events.index('step:cp -f /etc/pacman.conf /etc/pacman.conf.bak'), events
+else:
+  assert init not in events, events
 # The caller renders from the platform's templates; root backs up and copies
 # the result.
 copies = [e for e in events if e.startswith('step:cp ')]

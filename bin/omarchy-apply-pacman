@@ -26,6 +26,7 @@ else
   (( $# >= 1 && $# <= 2 )) || usage
   channel="$1"
   etc="${2:-/}/etc"
+  target="${2:-/}"
 fi
 
 case "$channel" in
@@ -83,6 +84,12 @@ else
 fi
 
 if [[ -z $render_dir ]]; then
+  # The Pi's templates name its local repository, and pacman refuses to sync a
+  # file:// repository that has no database, so make sure it exists first. It
+  # lives on this machine's own root.
+  if [[ $platform == "aarch64-rpi" && $target == "/" ]]; then
+    omarchy-update-rpi-pkgs --init
+  fi
   mkdir -p "$etc/pacman.d"
   for file in pacman.conf pacman.d/mirrorlist; do
     if [[ -e $etc/$file ]]; then
