@@ -3,17 +3,24 @@
 # omarchy:summary=Overwrite the user config for the Limine bootloader and rebuild it.
 # omarchy:requires-sudo=true
 
-legacy_uki="/boot/EFI/Linux/$(cat /etc/machine-id)_linux.efi"
+# A computer that boots without Limine, such as a Raspberry Pi, whose firmware
+# loads the kernel straight from /boot, has no Limine config to reset, and a
+# limine.conf copied there would only sit among its boot files.
+if omarchy-cmd-missing limine-update; then
+  echo "This computer does not boot with Limine, so there is no Limine config to refresh."
+else
+  legacy_uki="/boot/EFI/Linux/$(cat /etc/machine-id)_linux.efi"
 
-if sudo test -f /boot/EFI/Linux/omarchy_linux.efi && sudo test -f "$legacy_uki"; then
-  echo "Cleanup extra UKI"
-  sudo rm -f "$legacy_uki"
+  if sudo test -f /boot/EFI/Linux/omarchy_linux.efi && sudo test -f "$legacy_uki"; then
+    echo "Cleanup extra UKI"
+    sudo rm -f "$legacy_uki"
+  fi
+  echo "Resetting limine config"
+
+  sudo mv /boot/limine.conf /boot/limine.conf.bak
+
+  sudo cp "$OMARCHY_PATH/default/limine/limine.conf" /boot/limine.conf
+
+  sudo limine-update
+  sudo limine-snapper-sync
 fi
-echo "Resetting limine config"
-
-sudo mv /boot/limine.conf /boot/limine.conf.bak
-
-sudo cp "$OMARCHY_PATH/default/limine/limine.conf" /boot/limine.conf
-
-sudo limine-update
-sudo limine-snapper-sync
