@@ -53,6 +53,20 @@ done <"$state/devices"
 echo "findfs: unable to resolve '\$1'" >&2
 exit 1
 SH
+# blkid -t lists every device that carries the tag.
+cat >"$stubs/blkid" <<SH
+#!/bin/bash
+echo "blkid \$*" >>"$calls"
+[[ \$1 == "-c" && \$2 == "/dev/null" && \$3 == "-o" && \$4 == "device" && \$5 == "-t" ]] || exit 4
+status=2
+while read -r spec device; do
+  if [[ \$spec == "\$6" ]]; then
+    echo "\$device"
+    status=0
+  fi
+done <"$state/devices"
+exit \$status
+SH
 cat >"$stubs/mkinitcpio" <<SH
 #!/bin/bash
 echo "mkinitcpio \$*" >>"$calls"
@@ -499,6 +513,26 @@ reset_root
 echo "root=/dev/sda1 rw rootwait root=PARTUUID=$partuuid" >"$root/boot/cmdline.txt"
 output=$(on aarch64-rpi update-verify 2>&1) || fail "the last root= is the one the kernel takes" "$output"
 pass "update-verify fails unless the first line of cmdline.txt boots the device mounted at /"
+
+# A second card flashed from the same image carries the root's PARTUUID too, so
+# the next boot may mount either. That is the cause, whichever one findfs picks
+# now, and setup-boot would not fix it.
+for order in after before; do
+  reset_root
+  echo "root=PARTUUID=$partuuid rw rootwait" >"$root/boot/cmdline.txt"
+  touch "$root/dev/sda2"
+  if [[ $order == "after" ]]; then
+    echo "PARTUUID=$partuuid /dev/sda2" >>"$state/devices"
+  else
+    sed -i "1i PARTUUID=$partuuid /dev/sda2" "$state/devices"
+  fi
+  status=0
+  output=$(on aarch64-rpi update-verify 2>&1) || status=$?
+  (( status == 1 )) && [[ $output == *"names the partition mounted at / (/dev/mmcblk0p2), and also /dev/sda2: another attached disk"* &&
+    $output == *"Disconnect that disk before rebooting"* && $output != *setup-boot* ]] ||
+    fail "update-verify blames another disk that carries the root's PARTUUID (found $order the root)" "status $status: $output"
+done
+pass "update-verify fails when another disk carries the root's PARTUUID, and says so"
 
 # Every failure is explained, not just the first.
 reset_root

@@ -19,8 +19,8 @@ license=('MIT')
 # own the boot partition's firmware, kernel, config.txt and cmdline.txt;
 # mkinitcpio rebuilds and lists the initramfs (mkinitcpio, lsinitcpio);
 # util-linux finds the root and its disk and repartitions it (findmnt, findfs,
-# lsblk, sfdisk, partx); e2fsprogs grows the filesystem (resize2fs); gawk reads
-# the partition table.
+# blkid, lsblk, sfdisk, partx); e2fsprogs grows the filesystem (resize2fs); gawk
+# reads the partition table.
 depends=(
   'omarchy'
   'raspberrypi-bootloader'

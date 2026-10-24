@@ -15,7 +15,9 @@
 #   usr/lib/modules/<kver>/
 # - config.txt has an active initramfs line, and it loads initramfs-linux.img
 # - the root= of cmdline.txt (its first line, the one the firmware reads)
-#   resolves to the device mounted at /
+#   resolves to the device mounted at /, and to no other: every card flashed
+#   from one image carries the same disk identifier, so with a second one
+#   attached the next boot may mount either
 #
 # Every failure is explained on stderr, and any failure exits 1.
 #
@@ -159,9 +161,17 @@ else
   # The device the initramfs mounts: it looks a tag up through blkid, as findfs
   # does, and takes a device path as it is.
   device=""
+  carriers=()
   case $root_spec in
     PARTUUID=* | UUID=* | LABEL=* | PARTLABEL=*)
       device=$(findfs "$root_spec" 2>/dev/null) || device=""
+      # Every device that carries the tag, from a fresh scan rather than udev's
+      # links. Every card flashed from one image carries the same identifiers,
+      # and with two attached the initramfs takes whichever blkid finds first.
+      listing=$(blkid -c /dev/null -o device -t "$root_spec" 2>/dev/null) || listing=""
+      if [[ -n $listing ]]; then
+        mapfile -t carriers <<<"$listing"
+      fi
       ;;
     /dev/*)
       device=$root_spec
@@ -170,8 +180,25 @@ else
   mounted=$(findmnt -nvo SOURCE /) || mounted=""
   trim mounted "$mounted"
 
+  # The other devices root= names when one of them is the root mounted at /.
+  others=()
+  if (( ${#carriers[@]} > 1 )) && [[ -n $mounted ]]; then
+    for carrier in "${carriers[@]}"; do
+      if [[ ! $fixture$carrier -ef $fixture$mounted ]]; then
+        others+=("$carrier")
+      fi
+    done
+    if (( ${#others[@]} == ${#carriers[@]} )); then
+      others=()
+    fi
+  fi
+  printf -v other_list '%s, ' "${others[@]}"
+  other_list=${other_list%, }
+
   if [[ -z $root_spec ]]; then
     problem "$cmdline names no root=, so the kernel cannot find the root filesystem; run: sudo omarchy-lifecycle-dispatch setup-boot"
+  elif (( ${#others[@]} )); then
+    problem "root=$root_spec in $cmdline names the partition mounted at / ($mounted), and also $other_list: another attached disk carries the same identifiers, most likely one flashed from the same image, so the next boot may mount its root and /boot instead. Disconnect that disk before rebooting, then check again with: sudo omarchy-lifecycle-dispatch update-verify"
   elif [[ -z $device || ! -e $fixture$device ]]; then
     problem "root=$root_spec in $cmdline matches no device on this machine, so the next boot cannot mount its root; run: sudo omarchy-lifecycle-dispatch setup-boot"
   elif [[ -z $mounted || ! $fixture$device -ef $fixture$mounted ]]; then
