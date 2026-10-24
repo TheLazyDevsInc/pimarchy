@@ -1439,7 +1439,7 @@ choose_identifiers() {
 }
 
 setup_boot() {
-  local setup=/usr/lib/omarchy/rpi-boot/setup-boot shim=$root/usr/local/sbin/findmnt initcpio_log
+  local setup=/usr/lib/omarchy/rpi-boot/setup-boot shim=$root/usr/local/sbin/findmnt initcpio_log initcpio_list
 
   unmask_mkinitcpio_hook
   [[ -x $root$setup ]] || fail "$setup is missing: omarchy-rpi-boot is not installed"
@@ -1461,6 +1461,11 @@ setup_boot() {
   rm -f -- "$shim"
   grep -q "root=PARTUUID=$disk_id-02\( \|$\)" "$root/boot/cmdline.txt" ||
     fail "setup-boot did not point /boot/cmdline.txt at PARTUUID=$disk_id-02: $(<"$root/boot/cmdline.txt")"
+  # Every card flashed from the image starts with its disk identifier. The first
+  # boot finds the root by its filesystem's UUID instead, and the boot package's
+  # initramfs hook gives the card an identifier of its own and points
+  # cmdline.txt and fstab at it (pimarchy.new_disk_id).
+  sed -i "s/root=PARTUUID=$disk_id-02\( \|$\)/root=UUID=$root_fs_uuid\1/; s/\$/ pimarchy.new_disk_id/" "$root/boot/cmdline.txt"
   echo "cmdline.txt: $(<"$root/boot/cmdline.txt")"
 
   cat >"$root/etc/fstab" <<FSTAB
@@ -1484,6 +1489,9 @@ FSTAB
     fi
   fi
   printf '%s\n' "$initcpio_log"
+  initcpio_list=$(guest lsinitcpio /boot/initramfs-linux.img) || fail "lsinitcpio cannot list the initramfs"
+  grep -qE '^(\./)?hooks/omarchy-rpi-disk-id$' <<<"$initcpio_list" ||
+    fail "the initramfs has no omarchy-rpi-disk-id hook, so the first boot would keep the image's disk identifier"
   if grep -q 'Running build hook: \[autodetect\]' <<<"$initcpio_log"; then
     fail "mkinitcpio ran its autodetect hook, which reads this build host's hardware"
   fi
@@ -1646,8 +1654,10 @@ root_problems() (
   for file in kernel8.img initramfs-linux.img bcm2711-rpi-400.dtb start4.elf fixup4.dat config.txt cmdline.txt; do
     [[ -s $root/boot/$file ]] || problem "/boot/$file is missing"
   done
-  grep -q "root=PARTUUID=$disk_id-02\( \|$\)" "$root/boot/cmdline.txt" 2>/dev/null ||
-    problem "/boot/cmdline.txt does not name root=PARTUUID=$disk_id-02"
+  grep -q "root=UUID=$root_fs_uuid .*pimarchy\.new_disk_id\( \|$\)" "$root/boot/cmdline.txt" 2>/dev/null ||
+    problem "/boot/cmdline.txt does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id, so the first boot would keep the image's disk identifier"
+  [[ -f $root/usr/lib/initcpio/hooks/omarchy-rpi-disk-id && -f $root/etc/mkinitcpio.conf.d/90-omarchy-rpi-disk-id.conf ]] ||
+    problem "omarchy-rpi-boot's omarchy-rpi-disk-id initramfs hook is missing, so the first boot would keep the image's disk identifier"
   grep -qE '^[[:space:]]*initramfs[[:space:]]+initramfs-linux\.img' "$root/boot/config.txt" 2>/dev/null ||
     problem "/boot/config.txt does not load initramfs-linux.img"
   grep -q "^PARTUUID=$disk_id-02 \+/ \+ext4" "$root/etc/fstab" && grep -q "^PARTUUID=$disk_id-01 \+/boot \+vfat" "$root/etc/fstab" ||

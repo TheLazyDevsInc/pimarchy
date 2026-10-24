@@ -434,6 +434,7 @@ else
   work=$TMPDIR/validate-work
   mkdir -p "$work"
   disk_id=1a2b3c4d
+  root_fs_uuid=5c6d7e8f-0a1b-4c2d-8e3f-9a0b1c2d3e4f
   channel=stable
   branch=main
   origin_url=https://example.invalid/pimarchy.git
@@ -467,8 +468,11 @@ else
   for file in kernel8.img initramfs-linux.img bcm2711-rpi-400.dtb start4.elf fixup4.dat; do
     printf 'x' >"$root/boot/$file"
   done
-  printf 'root=PARTUUID=%s-02 rw rootwait console=tty1 quiet splash\n' "$disk_id" >"$root/boot/cmdline.txt"
+  printf 'root=UUID=%s rw rootwait console=tty1 quiet splash pimarchy.new_disk_id\n' "$root_fs_uuid" >"$root/boot/cmdline.txt"
   printf '[all]\ninitramfs initramfs-linux.img followkernel\n' >"$root/boot/config.txt"
+  mkdir -p "$root/usr/lib/initcpio/hooks" "$root/etc/mkinitcpio.conf.d"
+  : >"$root/usr/lib/initcpio/hooks/omarchy-rpi-disk-id"
+  : >"$root/etc/mkinitcpio.conf.d/90-omarchy-rpi-disk-id.conf"
   printf 'PARTUUID=%s-02  /      ext4    rw,relatime  0 1\nPARTUUID=%s-01  /boot  vfat    rw,relatime  0 2\n' \
     "$disk_id" "$disk_id" >"$root/etc/fstab"
   : >"$root/var/lib/pimarchy/grow-root-pending"
@@ -552,9 +556,16 @@ else
   expect_problem "a root whose root password is not locked is refused" "root's password is not locked"
   printf 'root:!:20000::::::\n' >"$root/etc/shadow"
 
-  printf 'root=/dev/mmcblk0p2 rw rootwait\n' >"$root/boot/cmdline.txt"
-  expect_problem "a cmdline.txt that names another root is refused" "does not name root=PARTUUID=$disk_id-02"
-  printf 'root=PARTUUID=%s-02 rw rootwait console=tty1 quiet splash\n' "$disk_id" >"$root/boot/cmdline.txt"
+  printf 'root=/dev/mmcblk0p2 rw rootwait pimarchy.new_disk_id\n' >"$root/boot/cmdline.txt"
+  expect_problem "a cmdline.txt that names another root is refused" "does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id"
+  printf 'root=UUID=%s rw rootwait console=tty1 quiet splash\n' "$root_fs_uuid" >"$root/boot/cmdline.txt"
+  expect_problem "a cmdline.txt without the first-boot flag is refused, since the card would keep the image's identifier" \
+    "does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id"
+  printf 'root=UUID=%s rw rootwait console=tty1 quiet splash pimarchy.new_disk_id\n' "$root_fs_uuid" >"$root/boot/cmdline.txt"
+
+  mv "$root/usr/lib/initcpio/hooks/omarchy-rpi-disk-id" "$TMPDIR/omarchy-rpi-disk-id"
+  expect_problem "a root without the disk identifier hook is refused" "omarchy-rpi-disk-id initramfs hook is missing"
+  mv "$TMPDIR/omarchy-rpi-disk-id" "$root/usr/lib/initcpio/hooks/omarchy-rpi-disk-id"
 
   : >"$root/boot/initramfs-linux.img"
   expect_problem "a root without an initramfs is refused" "/boot/initramfs-linux.img is missing"
