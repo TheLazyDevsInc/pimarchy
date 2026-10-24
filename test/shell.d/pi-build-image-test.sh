@@ -216,6 +216,41 @@ grep -q '^Error: the build failed in step 1 (Checking prerequisites)' "$TMPDIR/s
   fail "a build stopped with Ctrl-C logs the step it stopped in" "$(<"$TMPDIR/stopped/build.log")"
 pass "a build stopped with Ctrl-C logs the step it stopped in"
 
+# ── The keyring ──────────────────────────────────────────────────────────────
+
+# omarchy-keyring comes from a repository whose database is unsigned. Until
+# pacman has checked the package's signature, the build trusts none of the
+# package's keys but Omarchy's, pinned by its fingerprint.
+if ! command -v bsdtar >/dev/null; then
+  skip "the keyring bootstrap (it needs bsdtar)"
+else
+  mkdir -p "$TMPDIR/keyring-package/usr/share/pacman/keyrings"
+  printf 'keys\n' >"$TMPDIR/keyring-package/usr/share/pacman/keyrings/omarchy.gpg"
+  printf '%s:4:\n' "$omarchy_key" 0123456789ABCDEF0123456789ABCDEF01234567 \
+    >"$TMPDIR/keyring-package/usr/share/pacman/keyrings/omarchy-trusted"
+  bsdtar -cf "$TMPDIR/omarchy-keyring.pkg.tar" -C "$TMPDIR/keyring-package" usr
+  output=$(
+    root=$TMPDIR/keyring-root work=$TMPDIR/keyring-work package_cache=$TMPDIR/keyring-cache
+    mkdir -p "$root" "$work" "$package_cache"
+    guest() {
+      if [[ $1 == pacman* ]]; then
+        echo "guest: $*"
+      fi
+      if [[ $* == *" -Sp omarchy-keyring" ]]; then
+        echo "https://pkgs.example.invalid/stable/aarch64/omarchy-keyring-1-1-any.pkg.tar.zst"
+      fi
+    }
+    curl() { cp -- "$TMPDIR/omarchy-keyring.pkg.tar" "${@: -2:1}"; }
+    setup_keyring 2>&1
+  ) || fail "the build keyring is set up" "$output"
+  before=${output%%" -S omarchy-keyring"*}
+  [[ $output == *" -S omarchy-keyring"* && $before == *"guest: pacman-key --add $guest_scratch/omarchy.gpg"* &&
+    $before == *"guest: pacman-key --lsign-key $omarchy_key"* && $before != *"--populate omarchy"* &&
+    ${output#"$before"} == *"guest: pacman-key --populate omarchy"* ]] ||
+    fail "the build trusts Omarchy's pinned key alone until omarchy-keyring is installed, then the keys it lists" "$output"
+  pass "the build trusts Omarchy's pinned key alone until omarchy-keyring is installed, then the keys it lists"
+fi
+
 # ── The kernel swap ──────────────────────────────────────────────────────────
 
 # The family list names the Pi's boot package, which [pimarchy] only has once

@@ -1042,28 +1042,43 @@ keys_trusted() {
     done' pimarchy-keys "$@"
 }
 
-# pacman-key --populate signs each key with a gpg of its own and carries on when
-# one crashes under emulation, which leaves that key untrusted: pacman then
-# refuses its packages. Populates the keyrings named after the key, until the
-# key is trusted.
-populate_keyring() {
+# pacman-key signs each key with a gpg of its own and carries on when one
+# crashes under emulation, which leaves that key untrusted: pacman then refuses
+# its packages. Runs $2... until the build keyring trusts key $1.
+until_trusted() {
   local key=$1 attempt
   shift
 
   for attempt in 1 2 3; do
-    guest_retry pacman-key --populate "$@" || true
+    "$@" || true
     if keys_trusted "$key"; then
       return 0
     fi
-    warn "the build keyring does not trust $key yet; populating it again"
+    warn "the build keyring does not trust $key yet; trying again"
   done
   fail "the build keyring does not trust $key"
+}
+
+# Populates the keyrings $2... (all of them when none is named) until key $1 is
+# trusted.
+populate_keyring() {
+  local key=$1
+  shift
+
+  until_trusted "$key" guest_retry pacman-key --populate "$@"
+}
+
+# Adds the keys in file $2 inside the image and signs key $1 alone of them: its
+# fingerprint pins it, and the others stay untrusted.
+pin_key() {
+  guest_retry pacman-key --add "$2" || true
+  guest_retry pacman-key --lsign-key "$1"
 }
 
 # The tarball has no pacman keyring. This one only serves the build: sealing
 # removes it, and each Pi makes its own on its first boot.
 setup_keyring() {
-  local url package keyrings=$work/keyring file copied=() attempt
+  local url package key_file=$guest_scratch/omarchy.gpg attempt
 
   for attempt in 1 2 3; do
     rm -rf -- "$root/etc/pacman.d/gnupg"
@@ -1078,9 +1093,12 @@ setup_keyring() {
   populate_keyring "$alarm_key"
   guest_pacman -Sy
 
-  # Omarchy's key comes in omarchy-keyring, which is signed with it: trust the
-  # key from the package's own keyring files first, then install the package
-  # with its signature checked.
+  # Omarchy signs its packages, omarchy-keyring among them, with its key, and
+  # [omarchy]'s database is unsigned. As the Omarchy ISO does, the build trusts
+  # that one key, pinned by its fingerprint, installs omarchy-keyring with its
+  # signature checked against it, and only then trusts the keys the installed
+  # package lists. The pinned key is read from the downloaded package before
+  # anything has checked it, so none of the package's other keys is signed.
   url=$(guest_retry pacman --disable-sandbox -Sp omarchy-keyring | grep '://' | tail -1) ||
     fail "pacman cannot find omarchy-keyring in [omarchy]"
   package=$package_cache/${url##*/}
@@ -1090,20 +1108,14 @@ setup_keyring() {
   fi
   [[ -f $package ]] || fail "omarchy-keyring is not at $package"
 
-  rm -rf -- "$keyrings"
-  install -d -m 0700 "$keyrings"
-  bsdtar -xf "$package" -C "$keyrings" usr/share/pacman/keyrings
-  for file in "$keyrings"/usr/share/pacman/keyrings/omarchy*; do
-    [[ -f $file ]] || continue
-    install -m 0644 -o 0 -g 0 -- "$file" "$root/usr/share/pacman/keyrings/${file##*/}"
-    copied+=("$root/usr/share/pacman/keyrings/${file##*/}")
-  done
-  (( ${#copied[@]} )) || fail "$package carries no keyring"
-  populate_keyring "$omarchy_key" omarchy
-  rm -f -- "${copied[@]}"
-  rm -rf -- "$keyrings"
+  install -d -m 0755 "$root$guest_scratch"
+  bsdtar -xOf "$package" usr/share/pacman/keyrings/omarchy.gpg >"$root$key_file" ||
+    fail "$package carries no usr/share/pacman/keyrings/omarchy.gpg"
+  until_trusted "$omarchy_key" pin_key "$omarchy_key" "$key_file"
+  rm -f -- "$root$key_file"
 
   guest_pacman -S omarchy-keyring
+  populate_keyring "$omarchy_key" omarchy
   keys_trusted "$omarchy_key" "$alarm_key" || fail "the build keyring does not trust Omarchy's and Arch Linux ARM's keys"
 }
 
