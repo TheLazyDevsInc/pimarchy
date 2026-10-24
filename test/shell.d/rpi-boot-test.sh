@@ -601,3 +601,18 @@ for script in setup-boot update-verify grow-root; do
   [[ -x $scripts/$script && $(head -n 1 "$scripts/$script") == "#!/bin/bash -p" ]] || fail "$script is a privileged Bash executable"
 done
 pass "the grow-root unit runs grow-root in early boot while its marker exists, and every Pi boot script is a privileged Bash executable"
+
+# ── The package ──────────────────────────────────────────────────────────────
+
+# omarchy-rpi-boot installs each script where the dispatcher and systemd look.
+pkgbuild=$ROOT/pi/pkgbuilds/omarchy-rpi-boot/PKGBUILD
+bash -n "$pkgbuild" || fail "the PKGBUILD parses"
+for script in setup-boot update-verify grow-root; do
+  grep -q "\\b$script\\b" <(grep -A 3 'for entrypoint in' "$pkgbuild") || fail "the package installs $script"
+done
+grep -qF 'install -Dm755 "$entrypoint" "$pkgdir/usr/lib/omarchy/rpi-boot/$entrypoint"' "$pkgbuild" &&
+  grep -qF 'omarchy-rpi-grow-root.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-grow-root.service"' "$pkgbuild" ||
+  fail "the package installs its entrypoints and unit where the dispatcher and systemd look"
+[[ $(ls "$scripts") == $'grow-root\nomarchy-rpi-grow-root.service\nsetup-boot\nupdate-verify' ]] ||
+  fail "the package installs every file in pi/rpi-boot" "$(ls "$scripts")"
+pass "omarchy-rpi-boot installs every Pi boot script and the grow-root unit"

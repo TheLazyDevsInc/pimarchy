@@ -1,0 +1,57 @@
+# Raspberry Pi boot support for Pimarchy: the lifecycle operations
+# omarchy-lifecycle-dispatch registers for aarch64-rpi (setup-boot and
+# update-verify, see docs/lifecycle-dispatch.md) and the first-boot root
+# partition grower. Its sources are pi/rpi-boot/ in the Pimarchy checkout.
+#
+# Built on the Pi from its checkout, like this tree's omarchy and
+# omarchy-settings: OMARCHY_SRC=<checkout> makepkg. pkgver is the base the
+# builder extends with .r<commit count>.g<short sha> of that checkout, so every
+# build of a newer commit sorts higher; keep pkgrel=1.
+pkgname=omarchy-rpi-boot
+pkgver=1
+pkgrel=1
+pkgdesc='Raspberry Pi boot support for Omarchy: cmdline.txt and config.txt setup, update verification and first-boot root growth'
+arch=('aarch64')
+url='https://github.com/omacom/omarchy'
+license=('MIT')
+# Only what the scripts run. omarchy provides omarchy-hw-aarch64-rpi, which
+# each one runs before it changes anything; raspberrypi-bootloader and linux-rpi
+# own the boot partition's firmware, kernel, config.txt and cmdline.txt;
+# mkinitcpio rebuilds and lists the initramfs (mkinitcpio, lsinitcpio);
+# util-linux finds the root and its disk and repartitions it (findmnt, findfs,
+# lsblk, sfdisk, partx); e2fsprogs grows the filesystem (resize2fs); gawk reads
+# the partition table.
+depends=(
+  'omarchy'
+  'raspberrypi-bootloader'
+  'linux-rpi'
+  'mkinitcpio'
+  'util-linux'
+  'e2fsprogs'
+  'gawk'
+)
+source=()
+sha256sums=()
+
+prepare() {
+  if [[ -z ${OMARCHY_SRC:-} ]]; then
+    echo "Set OMARCHY_SRC to the Pimarchy checkout this package builds from" >&2
+    return 1
+  fi
+  rm -rf "$srcdir/rpi-boot"
+  cp -a "$OMARCHY_SRC/pi/rpi-boot" "$srcdir/rpi-boot"
+  install -Dm644 "$OMARCHY_SRC/LICENSE" "$srcdir/LICENSE"
+}
+
+package() {
+  cd "$srcdir/rpi-boot"
+
+  # Lifecycle dispatch runs only root-owned entrypoints in root-owned
+  # directories that no one else can write.
+  local entrypoint
+  for entrypoint in setup-boot update-verify grow-root; do
+    install -Dm755 "$entrypoint" "$pkgdir/usr/lib/omarchy/rpi-boot/$entrypoint"
+  done
+  install -Dm644 omarchy-rpi-grow-root.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-grow-root.service"
+  install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
