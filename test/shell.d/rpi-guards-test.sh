@@ -84,3 +84,53 @@ for machine in x86 arm; do
   run "$machine" bash -c "$direct_boot" || fail "Direct Boot stays on the $machine machine"
 done
 pass "the menu hides Direct Boot on a Pi and keeps it on x86 and other ARM machines"
+
+# omarchy-update-firmware: the bootloader EEPROM on a Pi, fwupd elsewhere.
+# rpi-eeprom-update reports, exiting 1 when an update is available, and stages
+# the update with -a. It records its stdin, since with a terminal there it
+# would ask before installing.
+record_stub fwupdmgr
+record_stub omarchy-pkg-add
+record_stub omarchy-state
+cat >"$stub_bin/rpi-eeprom-update" <<'SH'
+#!/bin/bash
+stdin=$(readlink /proc/$$/fd/0)
+printf 'rpi-eeprom-update %s stdin=%s\n' "$*" "$stdin" >>"$CALL_LOG"
+if [[ $* == "-a" ]]; then
+  echo "*** PREPARING EEPROM UPDATES ***"
+  exit 0
+fi
+echo "BOOTLOADER: status"
+exit "${TEST_EEPROM_STATUS:-0}"
+SH
+chmod +x "$stub_bin/rpi-eeprom-update"
+
+output=$(TEST_EEPROM_STATUS=0 run pi400 "$ROOT/bin/omarchy-update-firmware") || fail "an up-to-date Pi bootloader is a success"
+[[ $(grep -c '^rpi-eeprom-update' "$CALL_LOG") == 1 ]] || fail "an up-to-date Pi only checks its bootloader" "$(<"$CALL_LOG")"
+grep -Fxq 'rpi-eeprom-update  stdin=/dev/null' "$CALL_LOG" || fail "the check runs with no terminal, so it never asks" "$(<"$CALL_LOG")"
+[[ $output == *"BOOTLOADER: status"* ]] || fail "the Pi shows its bootloader status" "$output"
+! grep -Eq '^(fwupdmgr|omarchy-pkg-add|omarchy-state) ' "$CALL_LOG" || fail "a Pi never reaches fwupd or asks for a reboot" "$(<"$CALL_LOG")"
+
+output=$(TEST_EEPROM_STATUS=1 run pi400 "$ROOT/bin/omarchy-update-firmware") || fail "a Pi with a bootloader update applies it"
+grep -Fxq 'sudo rpi-eeprom-update -a' "$CALL_LOG" || fail "an available update is staged with -a" "$(<"$CALL_LOG")"
+grep -Fxq 'omarchy-state set reboot-required' "$CALL_LOG" || fail "a staged update asks for a reboot"
+[[ $output == *"Restart the computer to apply it."* ]] || fail "the Pi is told a reboot applies the update" "$output"
+! grep -q '^fwupdmgr ' "$CALL_LOG" || fail "a Pi never reaches fwupd"
+
+if TEST_EEPROM_STATUS=2 run pi400 "$ROOT/bin/omarchy-update-firmware" >/dev/null; then
+  fail "a failed bootloader check fails the update"
+fi
+! grep -Fq 'rpi-eeprom-update -a' "$CALL_LOG" || fail "a failed check stages nothing"
+pass "a Pi updates its bootloader EEPROM with rpi-eeprom-update"
+
+for machine in x86 arm; do
+  run "$machine" "$ROOT/bin/omarchy-update-firmware" >/dev/null || fail "the $machine machine updates firmware through fwupd"
+  grep -Fxq 'fwupdmgr refresh --force' "$CALL_LOG" || fail "the $machine machine refreshes fwupd metadata" "$(<"$CALL_LOG")"
+  grep -Fxq 'sudo fwupdmgr update' "$CALL_LOG" || fail "the $machine machine applies fwupd updates" "$(<"$CALL_LOG")"
+  ! grep -q '^rpi-eeprom-update' "$CALL_LOG" || fail "the $machine machine never runs the Pi updater"
+done
+mv "$stub_bin/fwupdmgr" "$scratch/fwupdmgr.off"
+run x86 "$ROOT/bin/omarchy-update-firmware" >/dev/null 2>&1 || true
+grep -Fxq 'omarchy-pkg-add fwupd' "$CALL_LOG" || fail "fwupd is still installed when it is missing" "$(<"$CALL_LOG")"
+mv "$scratch/fwupdmgr.off" "$stub_bin/fwupdmgr"
+pass "other machines update firmware through fwupd as before"

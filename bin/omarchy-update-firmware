@@ -1,18 +1,36 @@
 #!/bin/bash
 
-# omarchy:summary=Update system firmware using fwupd. Ensures the fwupd EFI binary is installed
+# omarchy:summary=Update system firmware using fwupd (a Raspberry Pi's bootloader EEPROM with rpi-eeprom-update). Ensures the fwupd EFI binary is installed
 # omarchy:requires-sudo=true
 
 set -e
 echo -e "\e[32mUpdate Firmware\e[0m"
 
-if omarchy-cmd-missing fwupdmgr; then
-  omarchy-pkg-add fwupd
-fi
+if omarchy-hw-aarch64-rpi; then
+  # A Pi's updatable firmware is its bootloader EEPROM (which also carries the
+  # USB controller's), and fwupd has no plugin for it. rpi-eeprom-update from
+  # rpi4-eeprom checks it: with no terminal on stdin it only reports, without
+  # asking, and exits 1 when an update is available. -a then stages the update
+  # on /boot, and the bootloader flashes it at the next boot.
+  status=0
+  sudo rpi-eeprom-update </dev/null || status=$?
 
-if [[ -d /sys/firmware/efi ]] && [[ -f /usr/lib/fwupd/efi/fwupdx64.efi ]]; then
-  sudo install -D /usr/lib/fwupd/efi/fwupdx64.efi /boot/EFI/arch/fwupdx64.efi
-fi
+  if (( status == 1 )); then
+    sudo rpi-eeprom-update -a
+    omarchy-state set reboot-required
+    echo "The bootloader update is staged. Restart the computer to apply it."
+  elif (( status != 0 )); then
+    exit "$status"
+  fi
+else
+  if omarchy-cmd-missing fwupdmgr; then
+    omarchy-pkg-add fwupd
+  fi
 
-fwupdmgr refresh --force
-sudo fwupdmgr update
+  if [[ -d /sys/firmware/efi ]] && [[ -f /usr/lib/fwupd/efi/fwupdx64.efi ]]; then
+    sudo install -D /usr/lib/fwupd/efi/fwupdx64.efi /boot/EFI/arch/fwupdx64.efi
+  fi
+
+  fwupdmgr refresh --force
+  sudo fwupdmgr update
+fi
