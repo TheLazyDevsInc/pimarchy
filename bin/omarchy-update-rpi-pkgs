@@ -39,7 +39,7 @@ set -euo pipefail
 # a user-writable checkout's bin/ on sudo's secure_path. The platform predicate
 # is the one shipped beside this file.
 if (( EUID == 0 )); then
-  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 fi
 here=${BASH_SOURCE[0]%/*}
 [[ $here != "${BASH_SOURCE[0]}" ]] || here=.
