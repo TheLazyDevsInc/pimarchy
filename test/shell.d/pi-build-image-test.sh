@@ -639,6 +639,9 @@ chmod 4755 "$root/usr/bin/tool"
 ln "$root/usr/bin/tool" "$root/usr/bin/tool-link"
 ln -s ../usr/bin/tool "$root/etc/tool"
 mkdir -m 0750 "$root/var/lib/private"
+# A sparse file stands in for a file on a host filesystem that compresses, such
+# as ZFS: both take fewer blocks on the host than their length.
+truncate -s 64M "$root/var/lib/sparse"
 kernel_sum=$(sha256sum <"$root/boot/kernel8.img")
 tool_sum=$(sha256sum <"$root/usr/bin/tool")
 
@@ -660,6 +663,9 @@ size_explicit=0
 result=$(pack_image 2>&1) || fail "the root packs into an image" "$result"
 [[ $result == *"so the image is 1 GiB"* ]] || fail "the default size grows to the next whole GiB the root fits in" "$result"
 pass "the default size grows to the next whole GiB the root fits in"
+[[ $result =~ holding\ ([0-9]+)\ MiB ]] && (( BASH_REMATCH[1] >= 64 )) ||
+  fail "the root's size counts its files' lengths, not the blocks the host gave them" "$result"
+pass "the root's size counts its files' lengths, not the blocks the host gave them"
 
 image=$output/$image_name.img.xz
 [[ -f $image && -f $image.sha256 ]] || fail "packing writes the compressed image and its checksum" "$(ls -la "$output")"

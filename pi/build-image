@@ -1725,6 +1725,20 @@ validate_root() {
 
 # ── 17. Pack ─────────────────────────────────────────────────────────────────
 
+# The KiB the files under $1 fill on ext4 with 4 KiB blocks: each file's length
+# rounded up to whole blocks, counted once however many names it has, and none
+# for a symlink short enough to live in its inode. It counts lengths, not the
+# blocks this host allocated (du): a host filesystem that compresses, such as
+# ZFS, allocates fewer blocks than mke2fs writes. On an ext4 host the two all
+# but agree.
+ext4_kib() {
+  find "$1" -xdev -printf '%n %i %y %s\n' |
+    awk '$1 > 1 && $3 != "d" && seen[$2]++ { next }
+      $3 == "l" && $4 < 60 { next }
+      { blocks += int(($4 + 4095) / 4096) }
+      END { printf "%.0f\n", blocks * 4 }'
+}
+
 # Packs $root into $output/$image_name.img(.xz) without mounts or loop devices:
 # an MBR disk image, a FAT32 filesystem built from its /boot and copied into
 # partition 1, and an ext4 filesystem built from the rest straight into
@@ -1755,7 +1769,7 @@ pack_image() {
 
   # The ext4 root: what it holds, its inode tables and journal, and room to
   # spare until it grows on the first boot.
-  used_kib=$(du -sx --block-size=1K -- "$root" | cut -f1)
+  used_kib=$(ext4_kib "$root")
   needed_bytes=$((used_kib * 1024 * 115 / 100 + 256 * 1048576))
   root_bytes=$((image_bytes - root_start))
   if (( needed_bytes > root_bytes )); then
