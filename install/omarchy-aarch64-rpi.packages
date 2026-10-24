@@ -6,9 +6,10 @@
 
 # The Raspberry Pi Foundation's kernel, which the firmware boots straight from
 # the FAT /boot partition (kernel8.img, device trees and overlays). Omarchy's own
-# aarch64 kernel is built without BCM2711 support.
+# aarch64 kernel is built without BCM2711 support. Nothing in the Pi's default
+# set builds kernel modules, so its headers (some 20,000 files on the SD card)
+# are left for whoever needs DKMS to install.
 linux-rpi
-linux-rpi-headers
 # The GPU firmware that boots the board (start4.elf, fixup4.dat), and the
 # Wi-Fi and Bluetooth firmware for its Cypress radio. Both come from [alarm].
 raspberrypi-bootloader

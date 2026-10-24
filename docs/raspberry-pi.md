@@ -16,7 +16,7 @@ An image names `platform=aarch64-rpi` in its image-target manifest, so the build
 
 The Pi composes the base list, `install/omarchy-aarch64.packages` and `install/omarchy-aarch64-rpi.packages` (`omarchy-pkg-defaults aarch64-rpi`). Its own list carries the boot chain and the board's hardware:
 
-- `linux-rpi` and its headers, the Raspberry Pi Foundation kernel from Arch Linux ARM's core. Omarchy's own aarch64 kernel is built without BCM2711 support.
+- `linux-rpi`, the Raspberry Pi Foundation kernel from Arch Linux ARM's core. Omarchy's own aarch64 kernel is built without BCM2711 support. Its headers are left out, since nothing in the default set builds kernel modules.
 - `raspberrypi-bootloader` (the GPU firmware that boots the board) and `firmware-raspberrypi` (Wi-Fi and Bluetooth firmware for its Cypress radio), both from `[alarm]`.
 - `raspberrypi-utils`, `rpi4-eeprom` for the bootloader EEPROM, `vulkan-broadcom` for the v3d GPU, and `wf-recorder` for screen recording.
 
