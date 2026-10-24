@@ -687,7 +687,7 @@ image=$output/$image_name.img.xz
 [[ -f $image && -f $image.sha256 ]] || fail "packing writes the compressed image and its checksum" "$(ls -la "$output")"
 (cd "$output" && sha256sum -c --quiet "$image_name.img.xz.sha256") || fail "the checksum matches the image"
 pass "packing writes the compressed image and a checksum that matches it"
-[[ -d $root/boot && -f $root/boot/cmdline.txt && ! -e $work/boot && ! -e $work/boot.img && ! -e $work/root.img ]] ||
+[[ -d $root/boot && -f $root/boot/cmdline.txt && ! -e $work/boot && ! -e $work/boot.img && ! -e $work/disk.img ]] ||
   fail "a kept root gets its /boot back, and no intermediate images stay" "$(ls -la "$work" "$root/boot")"
 pass "a kept root gets its /boot back, and no intermediate images stay"
 

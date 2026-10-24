@@ -440,8 +440,9 @@ check_prerequisites() {
   else
     echo "qemu: not needed on an aarch64 host"
   fi
-  # The root, its filesystem image and the disk image each take about as much
-  # as the installed system.
+  # The root and the disk image packed from it each take about as much as the
+  # installed system, and both are there at once while the image is packed;
+  # the package cache adds to that when it is on the same filesystem.
   read -r avail_kib < <(df -k --output=avail -- "$target_dir" | tail -1)
   if (( avail_kib < 25 * 1024 * 1024 )); then
     warn "$output has $((avail_kib / 1024 / 1024)) GiB free; a full build takes about 25 GiB"
