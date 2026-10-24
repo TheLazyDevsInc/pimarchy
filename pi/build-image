@@ -8,7 +8,8 @@
 # (no qemu on an aarch64 host), so every package, scriptlet and Omarchy setup
 # step runs inside the image as it would on the Pi. Running as real root keeps
 # the ownership and modes set inside the image, which mke2fs -d then copies as
-# they are.
+# they are. proot only maps files, so those programs share this host's kernel,
+# network and devices: build in a container or a throwaway VM.
 #
 # The root is turned into Pimarchy through the entry points an Omarchy ISO
 # install uses: the image-target manifest (install/helpers/image-target.sh)
@@ -417,7 +418,9 @@ exit "$status"'
 prepare_guest_env() {
   local name ca=""
 
-  guest_env=(HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/bin LANG=C.UTF-8 TERM=dumb)
+  # The build is pacman's caller, not omarchy update: once omarchy is in the
+  # image, its update guard would refuse any -Syu the build runs.
+  guest_env=(HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/bin LANG=C.UTF-8 TERM=dumb OMARCHY_ALLOW_DIRECT_PACMAN=1)
   for name in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
     if [[ -n ${!name:-} ]]; then
       guest_env+=("$name=${!name}")
