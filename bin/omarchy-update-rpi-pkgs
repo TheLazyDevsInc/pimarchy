@@ -192,11 +192,16 @@ echo -e "\e[32m\nUpdate Omarchy's Raspberry Pi packages\e[0m"
 
 # Fast-forward only. Local changes or local commits are someone's work: leave
 # them, say so, and build what is there.
+#
+# Root fetches with no terminal to ask for credentials on and a time limit, so
+# a repository that went private or a stalled network can't hold the update.
+# It prunes, so a branch deleted from origin stops resolving as the upstream
+# below instead of leaving the Pi on its last remote-tracking ref for good.
 before=$(src_git rev-parse --short HEAD)
-if ! upstream=$(src_git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
-  warn "The Pimarchy checkout at $src follows no upstream branch; building what is there."
-elif ! src_git fetch --quiet; then
-  warn "Could not fetch $upstream for the Pimarchy checkout; building what is there."
+if ! as_root env GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$src" fetch --quiet --prune; then
+  warn "Could not fetch the Pimarchy checkout at $src from its origin; building what is there."
+elif ! upstream=$(src_git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
+  warn "The Pimarchy checkout at $src follows no branch of its origin, or that branch is gone from it; building what is there."
 elif [[ -n $(src_git status --porcelain --untracked-files=no) ]]; then
   warn "The Pimarchy checkout at $src has local changes; building what is there."
 elif ! src_git merge --ff-only --quiet "$upstream" 2>/dev/null; then

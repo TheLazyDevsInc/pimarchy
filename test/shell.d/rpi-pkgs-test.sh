@@ -153,11 +153,12 @@ makepkg_runs() {
   sed -n 's/^makepkg .* pkg=\([^ ]*\) .*/\1/p' "$log" | tr '\n' ' '
 }
 
-# Git and repo-add work on root's checkout and repository: only through sudo.
+# Git and repo-add work on root's checkout and repository: only through sudo,
+# the fetch through env and timeout under it.
 assert_root_steps_through_sudo() {
   local command
   for command in git repo-add; do
-    (( $(grep -c "^$command " "$log" || true) == $(grep -c "^sudo $command " "$log" || true) )) ||
+    (( $(grep -c "^$command " "$log" || true) == $(grep -cE "^sudo (env GIT_TERMINAL_PROMPT=0 timeout [0-9]+ )?$command " "$log" || true) )) ||
       fail "$1: $command runs only through sudo" "$(output)"
   done
 }
@@ -295,7 +296,8 @@ pass "the builds are published to the repository, the commit recorded and the bu
 
 before=$(repo_state)
 run || fail "an up-to-date run succeeds" "$(output)"
-grep -qx "sudo git -C $src fetch --quiet" "$log" || fail "an up-to-date run still fetches" "$(output)"
+grep -qx "sudo env GIT_TERMINAL_PROMPT=0 timeout 120 git -C $src fetch --quiet --prune" "$log" ||
+  fail "an up-to-date run still fetches, as root, without a credential prompt, within a time limit and pruning" "$(output)"
 [[ -z $(makepkg_runs) ]] || fail "nothing is rebuilt for the commit already built" "$(output)"
 grep -q "up to date" "$test_tmp/out" || fail "an up-to-date run says so" "$(output)"
 [[ $(repo_state) == "$before" ]] || fail "an up-to-date run leaves the repository alone"
@@ -375,9 +377,21 @@ pass "a diverged checkout is built as it is"
 
 before=$(repo_state)
 if ! RPI_TEST_OFFLINE=1 run; then fail "an offline run still succeeds" "$(output)"; fi
-grep -q "Could not fetch origin/quattro" "$test_tmp/out" || fail "an offline run says it could not fetch" "$(output)"
+grep -q "Could not fetch the Pimarchy checkout" "$test_tmp/out" || fail "an offline run says it could not fetch" "$(output)"
 [[ $(repo_state) == "$before" ]] || fail "an offline run with nothing new changes nothing"
 pass "an offline run warns and builds what is there"
+
+# The branch the checkout follows is deleted from origin.
+"$real_git" -C "$src" checkout -q -b gone
+"$real_git" -C "$src" push -q -u origin gone
+"$real_git" -C "$origin" branch -q -D gone
+run || fail "a run whose upstream branch is gone still succeeds" "$(output)"
+grep -q "follows no branch of its origin, or that branch is gone from it" "$test_tmp/out" ||
+  fail "a branch deleted from origin is reported the run it goes" "$(output)"
+! "$real_git" -C "$src" rev-parse -q --verify refs/remotes/origin/gone >/dev/null || fail "the fetch prunes the deleted branch"
+"$real_git" -C "$src" checkout -q quattro
+"$real_git" -C "$src" branch -q -D gone
+pass "a branch deleted from origin is pruned and reported, not followed at its last known commit"
 
 # ── who builds ───────────────────────────────────────────────────────────────
 
