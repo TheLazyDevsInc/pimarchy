@@ -71,3 +71,16 @@ for call in "sudo mv /boot/limine.conf /boot/limine.conf.bak" "sudo cp $ROOT/def
   grep -Fxq "$call" "$CALL_LOG" || fail "refresh-limine still resets and rebuilds Limine where it is installed: $call" "$(<"$CALL_LOG")"
 done
 pass "refresh-limine steps aside without Limine and resets Limine where it is installed"
+
+# Direct Boot: a Pi has no UEFI to boot a UKI directly. The DGX Spark's marker
+# is pointed at a scratch path, so this machine's own file decides nothing.
+direct_boot=$(grep -F '"setup.direct-boot"' "$ROOT/default/omarchy/omarchy-menu.jsonc" |
+  sed -E 's/.*"when":"([^"]*)".*/\1/' | sed "s|/etc/limine-entry-tool.d/|$scratch/limine-entry-tool.d/|")
+[[ $direct_boot == *"omarchy-hw-aarch64-rpi"* ]] || fail "the Direct Boot entry asks the Pi predicate" "$direct_boot"
+for machine in pi400 mac; do
+  run "$machine" bash -c "$direct_boot" && fail "Direct Boot is hidden on the $machine"
+done
+for machine in x86 arm; do
+  run "$machine" bash -c "$direct_boot" || fail "Direct Boot stays on the $machine machine"
+done
+pass "the menu hides Direct Boot on a Pi and keeps it on x86 and other ARM machines"
