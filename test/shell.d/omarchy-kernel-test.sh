@@ -74,7 +74,31 @@ cat > "$scratch/root-bin/sed" <<'SH'
 /usr/bin/sed "$@" || exit
 [[ ${FAIL_WRITE:-0} == "0" || $1 != "-i" ]]
 SH
+# The user half only checks that Limine is there; the rebuild is root's.
+cat > "$scratch/bin/limine-mkinitcpio" <<'SH'
+#!/bin/bash
+printf 'user limine-mkinitcpio %s\n' "$*" >> "$CALL_LOG"
+exit 99
+SH
 chmod +x "$scratch/bin/"* "$scratch/root-bin/"*
+
+# Both halves ask the command helper whether Limine is there. An installed
+# Omarchy has it in /usr/bin, on root's PATH; this checkout's copy stands in.
+for dir in bin root-bin; do
+  ln -s "$ROOT/bin/omarchy-cmd-missing" "$scratch/$dir/omarchy-cmd-missing"
+done
+
+# A computer that boots without Limine, such as a Raspberry Pi: the same
+# escalation stubs and the tools list and get read, but no limine-mkinitcpio.
+# Only these are on its PATH, so this machine's own Limine stays out of it.
+mkdir -p "$scratch/no-limine-bin" "$scratch/no-limine-root-bin"
+for tool in pkexec sudo omarchy-state omarchy-notification-send omarchy-cmd-missing; do
+  ln -s "$scratch/bin/$tool" "$scratch/no-limine-bin/$tool"
+done
+ln -s "$ROOT/bin/omarchy-cmd-missing" "$scratch/no-limine-root-bin/omarchy-cmd-missing"
+for tool in cat sort sed tail; do
+  ln -s "$(command -v "$tool")" "$scratch/no-limine-bin/$tool"
+done
 
 reset_fixture() {
   : > "$CALL_LOG"
@@ -155,6 +179,18 @@ grep -Fxq "omarchy-notification-send -g  -u critical -t 30000 Couldn't switch
   fail "a failed switch says so like a success does, and retries in a terminal when clicked" "$(<"$CALL_LOG")"
 pass "a cancelled or failed pkexec leaves no reboot request"
 
+reset_fixture
+install_kernels linux-rpi
+if PATH="$scratch/no-limine-bin" "$command" set linux-rpi < /dev/null 2> "$scratch/output"; then
+  fail "set is refused on a computer that does not boot through Limine"
+fi
+grep -Fq "does not boot through Limine" "$scratch/output" || fail "the refusal says there is no Limine boot menu" "$(<"$scratch/output")"
+[[ ! -s $CALL_LOG ]] || fail "a computer without Limine never escalates or asks for a reboot" "$(<"$CALL_LOG")"
+cmp -s "$OMARCHY_KERNEL_LIMINE_CONF" "$scratch/original-limine" || fail "a refused switch leaves the boot order alone"
+[[ $(PATH="$scratch/no-limine-bin" "$command" list) == "linux-rpi" ]] || fail "list still works without Limine"
+PATH="$scratch/no-limine-bin" "$command" get > /dev/null || fail "get still works without Limine"
+pass "set refuses clearly without Limine, and list and get still work"
+
 if (( EUID != 0 )) && ! unshare --user --map-root-user true 2>/dev/null; then
   skip "root half needs a user namespace"
   exit 0
@@ -233,3 +269,11 @@ fi
 cmp -s "$OMARCHY_KERNEL_LIMINE_CONF" "$scratch/original-limine" || fail "a refused root switch leaves the boot order alone"
 ! grep -q '^limine-mkinitcpio' "$CALL_LOG" || fail "a refused root switch rebuilds nothing"
 pass "sudo omarchy-kernel set is refused under Direct Boot as well"
+
+reset_fixture
+if OMARCHY_KERNEL_ROOT_PATH="$scratch/no-limine-root-bin" as_root "$command" set linux 2> "$scratch/output"; then
+  fail "root is refused without Limine too"
+fi
+grep -Fq "does not boot through Limine" "$scratch/output" || fail "root's refusal says there is no Limine boot menu" "$(<"$scratch/output")"
+cmp -s "$OMARCHY_KERNEL_LIMINE_CONF" "$scratch/original-limine" || fail "root leaves the boot order alone without Limine"
+pass "sudo omarchy-kernel set is refused without Limine as well"

@@ -139,6 +139,12 @@ set_kernel() {
   if [[ -z $kernel ]]; then
     usage >&2
     exit 1
+  elif omarchy-cmd-missing limine-mkinitcpio; then
+    # Switching rebuilds the boot menu with limine-mkinitcpio. Without it the
+    # computer does not boot through Limine (a Raspberry Pi's firmware boots
+    # the one kernel config.txt names), so there is no menu to reorder.
+    echo "Error: this computer does not boot through Limine, so there is no boot menu to choose a kernel in." >&2
+    exit 1
   elif ! installed_kernels | grep -Fxq -- "$kernel"; then
     echo "Error: $kernel is not an installed kernel. Installed: $(installed_kernels | paste -sd ' ')" >&2
     exit 1
