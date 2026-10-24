@@ -1097,14 +1097,22 @@ setup_keyring() {
 # linux-rpi directly, and the two kernels conflict. The whole root is upgraded
 # in the same transaction, so nothing installed later meets older libraries.
 swap_kernel() {
-  local -a stock=() family=() boot=()
+  local -a family=() boot=()
   local package
 
-  mapfile -t stock < <(guest_retry pacman -Qq linux-aarch64 linux-aarch64-headers uboot-raspberrypi 2>/dev/null || true)
-  if (( ${#stock[@]} )); then
+  # Each run removes what is still installed: a pacman that crashes as it
+  # exits, once the removal is done, runs again, and must not then fail on what
+  # it already removed. pacman -Qq exits 1 for a package that isn't installed;
+  # a crashed one ends the run, which then runs again too.
+  guest_retry bash -c '
+    status=0
+    installed=$(pacman -Qq "$@" 2>/dev/null) || status=$?
+    (( status <= 1 )) || exit "$status"
+    [[ -n $installed ]] || exit 0
+    mapfile -t stock <<<"$installed"
     echo "Removing ${stock[*]}"
-    guest_pacman -Rdd "${stock[@]}"
-  fi
+    pacman --disable-sandbox --noconfirm --noprogressbar -Rdd "${stock[@]}"' pimarchy-kernel \
+    linux-aarch64 linux-aarch64-headers uboot-raspberrypi
 
   mapfile -t family < <(list_names "$root$guest_src/install/omarchy-$platform.packages")
   mapfile -t family < <(filter_package_names "${family[@]}")

@@ -220,10 +220,11 @@ pass "a build stopped with Ctrl-C logs the step it stopped in"
 
 # The family list names the Pi's boot package, which [pimarchy] only has once
 # the build has built it: the kernel swap installs the rest of the list.
+swap_root=$TMPDIR/swap-root
+mkdir -p "$swap_root$guest_src/install" "$swap_root/boot"
+printf 'linux-rpi\nraspberrypi-bootloader\n# The boot package\nomarchy-rpi-boot\nwf-recorder\n' >"$swap_root$guest_src/install/omarchy-$platform.packages"
 output=$(
-  root=$TMPDIR/swap-root
-  mkdir -p "$root$guest_src/install" "$root/boot"
-  printf 'linux-rpi\nraspberrypi-bootloader\n# The boot package\nomarchy-rpi-boot\nwf-recorder\n' >"$root$guest_src/install/omarchy-$platform.packages"
+  root=$swap_root
   guest_retry() { :; }
   guest_pacman() {
     echo "pacman $*"
@@ -241,6 +242,61 @@ pass "the kernel swap installs the family list but its local packages, which the
 [[ $output == *"pacman -Syu --needed "*" pipewire-jack "* && $output == *"pacman -Syu --needed "*" pipewire-pulse "* ]] ||
   fail "the kernel swap installs the ISO's PipeWire stack with the family list" "$output"
 pass "the kernel swap installs the ISO's PipeWire stack with the family list, so pipewire-jack provides JACK"
+
+# pacman in the image, run here: $INSTALLED lists its packages. Its first
+# removal crashes as it exits, once the packages are gone, as pacman under
+# proot now and then does.
+mkdir -p "$TMPDIR/image-pacman"
+cat >"$TMPDIR/image-pacman/pacman" <<'PACMAN'
+#!/bin/bash
+operation=""
+targets=()
+for arg; do
+  case $arg in
+    -Qq | -Rdd | -Syu) operation=$arg ;;
+    -*) ;;
+    *) targets+=("$arg") ;;
+  esac
+done
+if [[ $operation == "-Syu" ]]; then
+  printf 'k' >"$IMAGE_ROOT/boot/kernel8.img"
+  : >"$IMAGE_ROOT/boot/config.txt"
+  : >"$IMAGE_ROOT/boot/cmdline.txt"
+  exit 0
+fi
+status=0
+for target in "${targets[@]}"; do
+  if grep -qx -- "$target" "$INSTALLED"; then
+    [[ $operation != "-Qq" ]] || echo "$target"
+  else
+    echo "error: target not found: $target" >&2
+    status=1
+  fi
+done
+if [[ $operation == "-Rdd" ]] && (( status == 0 )); then
+  for target in "${targets[@]}"; do
+    grep -vx -- "$target" "$INSTALLED" >"$INSTALLED.new" || true
+    mv -- "$INSTALLED.new" "$INSTALLED"
+  done
+  if [[ ! -e $INSTALLED.crashed ]]; then
+    : >"$INSTALLED.crashed"
+    echo "double free or corruption (out)" >&2
+    exit 134
+  fi
+fi
+exit "$status"
+PACMAN
+chmod +x "$TMPDIR/image-pacman/pacman"
+printf 'bash\nlinux-aarch64\nuboot-raspberrypi\n' >"$TMPDIR/installed"
+status=0
+output=$(INSTALLED=$TMPDIR/installed IMAGE_ROOT=$swap_root PATH="$TMPDIR/image-pacman:$PATH" bash -c '
+  source "$1"
+  root=$2
+  guest() { "$@"; }
+  swap_kernel' bash "$BUILDER" "$swap_root" 2>&1) || status=$?
+(( status == 0 )) && [[ $(<"$TMPDIR/installed") == "bash" && $output == *"crashed under emulation"* ]] ||
+  fail "a removal of the stock kernel that crashes as pacman exits runs again and finishes" "$output"
+pass "a removal of the stock kernel that crashes as pacman exits runs again and finishes"
 
 # ── The image's checkout ─────────────────────────────────────────────────────
 
