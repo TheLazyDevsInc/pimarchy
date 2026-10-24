@@ -278,6 +278,12 @@ pid1 gb10-image chroot
 manifest gb10-image $'format=1\nplatform=aarch64-gb10\n'
 expect gb10-image aarch64-gb10 "a GB10 image's manifest reads as aarch64-gb10"
 
+# A Pi image is built on an x86_64 host, its chroot under aarch64 emulation.
+world rpi-image aarch64
+pid1 rpi-image chroot
+manifest rpi-image $'format=1\nplatform=aarch64-rpi\n'
+expect rpi-image aarch64-rpi "a Pi image built in a chroot on an x86 host reads as aarch64-rpi"
+
 # Comments and keys a later format adds are ignored.
 world commented aarch64
 pid1 commented chroot
@@ -431,6 +437,12 @@ if in_world on-a-mac "$ROOT/bin/omarchy-hw-apple-silicon"; then
 fi
 pass "the old Apple predicate name answers as omarchy-hw-aarch64-apple"
 
+in_world rpi-image "$ROOT/bin/omarchy-hw-aarch64-rpi" || fail "the Pi predicate accepts a Pi image build"
+if in_world x86-host "$ROOT/bin/omarchy-hw-aarch64-rpi"; then
+  fail "the Pi predicate rejects an Apple image build"
+fi
+pass "the Pi predicate follows the image target"
+
 packages=$(in_world x86-host env OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-pkg-defaults") || fail "an Apple image build composes its packages"
 [[ $packages == "$(OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-pkg-defaults" aarch64-apple)" ]] ||
   fail "an Apple image build installs the Apple Silicon package set"
@@ -440,6 +452,9 @@ packages=$(in_world on-a-mac env OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-pkg-def
 packages=$(in_world odd-host env OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-pkg-defaults") || fail "an image built on a contradictory host composes its packages"
 [[ $packages == "$(OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-pkg-defaults" aarch64)" ]] ||
   fail "an image built on a contradictory host installs its target's package set"
+packages=$(in_world rpi-image env OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-pkg-defaults") || fail "a Pi image build composes its packages"
+[[ $packages == "$(OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-pkg-defaults" aarch64-rpi)" ]] ||
+  fail "a Pi image build installs the Pi package set"
 pass "the default package set follows the image target"
 
 # A caller in a private PID namespace looks like a build, so no unit may use one.
