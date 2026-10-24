@@ -99,9 +99,48 @@ good_stubs() {
   stub qemu-aarch64 'echo "qemu-aarch64 version 10.0.13"'
 }
 good_stubs
-output=$(PATH="$stubs:$PATH" output="$TMPDIR/prereq-out" bash -c 'source "$1"; check_prerequisites' bash "$BUILDER" 2>&1) ||
+output=$(PATH="$stubs:$PATH" output="$TMPDIR/prereq-out" runner=proot bash -c 'source "$1"; check_prerequisites' bash "$BUILDER" 2>&1) ||
   fail "current tools pass the prerequisite checks" "$output"
 pass "current tools pass the prerequisite checks"
+
+# The chroot runner: binfmt_misc runs the image's binaries through qemu-user,
+# registered with the fix-binary flag so the handler works inside the chroot.
+binfmt=$TMPDIR/binfmt
+mkdir -p "$binfmt"
+printf '%s\n' 1 >"$binfmt/status"
+binfmt_entry() { # name, flags, interpreter
+  printf 'enabled\ninterpreter %s\nflags: %s\noffset 0\nmagic 7f454c460201010000000000000000000200b700\nmask ffffffffffffff00fffffffffffffffffeffffff\n' "$3" "$2" >"$binfmt/$1"
+}
+binfmt_entry qemu-aarch64 POCF "$stubs/qemu-aarch64"
+prereq() { # runner, then extra environment
+  local runner=$1
+  shift
+  PATH="$stubs:$PATH" output="$TMPDIR/prereq-out" OMARCHY_BINFMT_DIR="$binfmt" runner=$runner "$@" \
+    bash -c 'source "$1"; check_prerequisites && echo "chosen: $runner"' bash "$BUILDER" 2>&1
+}
+if [[ $(uname -m) != "aarch64" ]]; then
+  output=$(prereq chroot) || fail "a registered aarch64 handler passes the chroot runner's checks" "$output"
+  [[ $output == *"Runner: chroot"* && $output == *"through binfmt_misc"* ]] ||
+    fail "the chroot runner runs the image's binaries through binfmt_misc" "$output"
+  output=$(prereq auto) || fail "auto picks the chroot runner where binfmt_misc can run aarch64 binaries" "$output"
+  [[ $output == *"chosen: chroot"* ]] || fail "auto picks the chroot runner where binfmt_misc can run aarch64 binaries" "$output"
+  binfmt_entry qemu-aarch64 POC "$stubs/qemu-aarch64"
+  output=$(prereq auto) || fail "auto falls back to proot without a fix-binary handler" "$output"
+  [[ $output == *"chosen: proot"* ]] || fail "auto falls back to proot without a fix-binary handler" "$output"
+  status=0
+  output=$(prereq chroot) || status=$?
+  (( status != 0 )) && [[ $output == *"needs binfmt_misc to run aarch64 binaries"* ]] ||
+    fail "the chroot runner refuses a host whose binfmt_misc can't run aarch64 binaries in a chroot" "$output"
+  stub old-qemu 'echo "qemu-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)"'
+  binfmt_entry qemu-aarch64 POCF "$stubs/old-qemu"
+  status=0
+  output=$(prereq chroot) || status=$?
+  (( status != 0 )) && [[ $output == *"is qemu 8.2.2; qemu-user 8.2 crashes"* ]] ||
+    fail "the chroot runner checks the qemu behind binfmt_misc" "$output"
+  pass "the chroot runner needs a fix-binary aarch64 handler and a recent qemu behind it, and auto falls back to proot"
+else
+  skip "the chroot runner's binfmt checks (an aarch64 host runs the image natively)"
+fi
 
 stub mke2fs 'echo "mke2fs 1.42.9 (28-Dec-2013)" >&2'
 stub findmnt 'echo "vfat rw,noexec,relatime"'
@@ -111,7 +150,7 @@ stub qemu-aarch64 'echo "qemu-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)
 mkdir -m 0700 "$TMPDIR/private"
 mkdir "$TMPDIR/private/prereq-out"
 status=0
-output=$(PATH="$stubs:$PATH" output="$TMPDIR/private/prereq-out" bash -c 'source "$1"; check_prerequisites' bash "$BUILDER" 2>&1) || status=$?
+output=$(PATH="$stubs:$PATH" output="$TMPDIR/private/prereq-out" runner=proot bash -c 'source "$1"; check_prerequisites' bash "$BUILDER" 2>&1) || status=$?
 (( status != 0 )) || fail "old tools fail the prerequisite checks" "$output"
 for expected in "proot 5.1.0 does not translate faccessat2" "mke2fs 1.42.9 can't build a filesystem from a directory" \
   "is on a vfat filesystem" "mounted noexec" "$TMPDIR/private is not searchable by other users"; do
