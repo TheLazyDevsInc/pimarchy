@@ -144,7 +144,29 @@ run_gdk pi400 || fail "a user without monitors.lua is left alone"
 pass "a Pi's user gets GDK scale 1 only over the shipped value"
 
 # A config reinstall replays /etc/skel, whose monitors.lua has GDK scale 2, so
-# it has to put the Pi's scale back the way user setup set it.
-grep -Fxq 'source "$OMARCHY_PATH/install/user/hardware/rpi/gdk-scale.sh"' "$ROOT/bin/omarchy-reinstall-configs" ||
+# it has to put the Pi's scale back the way user setup set it. A copy of the
+# command replays a fixture skel, and the system steps after it are stubs.
+skel="$scratch/skel"
+mkdir -p "$skel/.config/hypr"
+cp "$ROOT/config/hypr/monitors.lua" "$skel/.config/hypr/monitors.lua"
+reinstall="$scratch/omarchy-reinstall-configs"
+sed "s|^cp -af /etc/skel/\. ~/$|cp -af \"$skel/.\" ~/|" "$ROOT/bin/omarchy-reinstall-configs" >"$reinstall"
+chmod +x "$reinstall"
+grep -Fq "\"$skel/.\"" "$reinstall" && ! grep -q '^cp .*/etc/skel' "$reinstall" ||
+  fail "the config reinstall copy replays the fixture skel"
+for stub in omarchy-refresh-limine omarchy-refresh-plymouth omarchy-install-video-decode; do
+  printf '#!/bin/bash\n' >"$scratch/bin/$stub"
+done
+printf '#!/bin/bash\nexit 1\n' >"$scratch/bin/omarchy-cmd-present"
+chmod +x "$scratch/bin"/*
+for machine in pi400 x86; do
+  monitors="$scratch/reinstall/$machine/.config/hypr/monitors.lua"
+  mkdir -p "${monitors%/*}"
+  sed 's/^local omarchy_gdk_scale = 2$/local omarchy_gdk_scale = 1/' "$ROOT/config/hypr/monitors.lua" >"$monitors"
+  run "$machine" env HOME="$scratch/reinstall/$machine" "$reinstall" >/dev/null || fail "a config reinstall runs on the $machine"
+done
+grep -qx 'local omarchy_gdk_scale = 1' "$scratch/reinstall/pi400/.config/hypr/monitors.lua" ||
   fail "a config reinstall re-applies a Pi's GDK scale"
+grep -qx 'local omarchy_gdk_scale = 2' "$scratch/reinstall/x86/.config/hypr/monitors.lua" ||
+  fail "a config reinstall puts the shipped GDK scale back on an x86 PC"
 pass "a config reinstall re-applies a Pi's GDK scale"
