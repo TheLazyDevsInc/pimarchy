@@ -17,9 +17,12 @@ This directory builds Pimarchy, this fork's Omarchy for the Raspberry Pi 400, as
 
 ## Building an image
 
-`pi/build-image` runs on an x86_64 or aarch64 Linux computer, as root. It needs no mounts or loop devices, so it also runs in a container. It runs every command meant for the image inside the image root, using proot and, on x86_64, qemu-user. Package installs, scriptlets and Omarchy's own setup therefore run as they would on the Pi, only much slower. Expect a build to take a few hours on x86_64, and to need about 25 GiB of free disk where `--output` points.
+`pi/build-image` runs on an x86_64 or aarch64 Linux computer, as root. It needs no loop devices and leaves no mounts behind. It runs every command meant for the image inside the image root, so package installs, scriptlets and Omarchy's own setup run as they would on the Pi, only slower on x86_64. It has two ways to do that, and picks one with `--runner`:
 
-proot only maps files. Everything the build runs inside the image runs as root on this computer's kernel, with its network, `/dev` and `/sys`. Package scripts and Omarchy's setup are written for the machine they install, so build in a container or a throwaway VM rather than on a computer you care about.
+- `chroot`, the default wherever it works: each command runs in a real chroot inside its own private mount namespace, whose mounts (`/proc`, `/sys`, `/dev`, the package cache) go when the command does. On x86_64 the kernel runs the image's aarch64 programs through qemu-user, registered with binfmt_misc. A build takes about an hour and a half on x86_64.
+- `proot`, for a host that can't register binfmt_misc handlers, such as an unprivileged container: proot maps the image root and runs its programs through qemu-user itself. It traces every system call, so a build takes several hours.
+
+Either way, expect to need about 25 GiB of free disk where `--output` points. Everything the build runs inside the image runs as root on this computer's kernel, with its network, `/dev` and `/sys`. Package scripts and Omarchy's setup are written for the machine they install, so build in a container or a throwaway VM rather than on a computer you care about.
 
 ```bash
 sudo pi/build-image --output ~/pimarchy-image
@@ -38,6 +41,7 @@ That builds `HEAD` of the checkout the script lives in, on the stable channel, i
 | `--tarball PATH` | | Use this Arch Linux ARM Raspberry Pi tarball instead of downloading it. A `PATH.md5` next to it is checked. |
 | `--keep-root` | | Keep `DIR/work`, the image root included, for inspection. |
 | `--no-compress` | | Write a plain `.img` instead of `.img.xz`. |
+| `--runner NAME` | `auto` | How to run the image's programs: `chroot`, `proot`, or `auto`, which takes `chroot` on an aarch64 host or where binfmt_misc runs aarch64 programs, and `proot` otherwise. |
 
 The Pi updates from the origin of the checkout the image was built from, so build from a checkout whose `origin` is an `https://` URL the Pi can fetch, such as the fork on GitHub, and push the branch before you flash. The image is built from the committed state of `--ref`, not from the working tree.
 
@@ -46,29 +50,39 @@ The Pi updates from the origin of the checkout the image was built from, so buil
 The builder checks for all of these before it starts and says what is missing:
 
 - `bsdtar`, `mkfs.vfat` and `fsck.vfat`, `mcopy`, `mke2fs` and `e2fsck` (e2fsprogs 1.43 or newer), `sfdisk`, `findmnt`, `xz`, `git` and `curl`.
-- proot 5.4 or newer. proot 5.1, which Ubuntu 24.04 still ships, does not translate the `faccessat2` system call that Arch Linux ARM's glibc uses, so tests inside the image look at the build host's files.
-- On an x86_64 host, qemu-user 10 or newer. The builder looks for `qemu-aarch64-static`, then `qemu-aarch64`. qemu 8.2, which Ubuntu 24.04 ships, crashes on Arch Linux ARM's glibc. No qemu is needed on an aarch64 host.
+- For the chroot runner, `unshare`, `mount` and `chroot`, and on an x86_64 host a static qemu-user 10 or newer registered with binfmt_misc for aarch64 with the fix-binary (`F`) flag. The kernel then opens qemu when it is registered, so it runs the image's programs inside a chroot that has no qemu of its own. The builder reads the registration from `/proc/sys/fs/binfmt_misc` and checks the qemu it names.
+- For the proot runner, proot 5.4 or newer, and on an x86_64 host qemu-user 10 or newer, found as `qemu-aarch64-static`, then `qemu-aarch64`. proot 5.1, which Ubuntu 24.04 still ships, does not translate the `faccessat2` system call that Arch Linux ARM's glibc uses, so tests inside the image look at the build host's files.
+- qemu 8.2, which Ubuntu 24.04 ships, crashes on Arch Linux ARM's glibc under either runner. No qemu is needed on an aarch64 host.
 
-On Arch Linux:
-
-```bash
-sudo pacman -S --needed libarchive dosfstools mtools e2fsprogs util-linux xz git curl proot qemu-user-static
-```
-
-On Debian 13 (trixie) or newer, whose proot and qemu are new enough:
+On Arch Linux, `qemu-user-static-binfmt` registers its static qemu with the `F` flag through systemd-binfmt:
 
 ```bash
-sudo apt install libarchive-tools dosfstools mtools e2fsprogs fdisk util-linux xz-utils git curl proot qemu-user-static
+sudo pacman -S --needed libarchive dosfstools mtools e2fsprogs util-linux xz git curl qemu-user-static qemu-user-static-binfmt
 ```
 
-On Ubuntu 24.04 or Debian 12, install everything above except `proot` and `qemu-user-static`, then take those two from Debian 13 without installing them. Download `proot` and `qemu-user-static` for your architecture from [packages.debian.org/trixie/proot](https://packages.debian.org/trixie/proot) and [packages.debian.org/trixie/qemu-user-static](https://packages.debian.org/trixie/qemu-user-static), then unpack them and put them first on the builder's `PATH`:
+On Debian 13 (trixie) or newer, whose qemu is new enough and static, `qemu-user-binfmt` registers it:
+
+```bash
+sudo apt install libarchive-tools dosfstools mtools e2fsprogs fdisk util-linux xz-utils git curl qemu-user qemu-user-binfmt
+```
+
+On Ubuntu 24.04 or Debian 12, install everything above except the qemu packages, then take qemu from Debian 13 without installing it. Debian 13's `qemu-user` is a static build (its `qemu-user-static` holds only links to it). Download `qemu-user` for your architecture from [packages.debian.org/trixie/qemu-user](https://packages.debian.org/trixie/qemu-user), unpack it, and register its `qemu-aarch64` in place of any older one until the next reboot:
 
 ```bash
 mkdir -p ~/pimarchy-tools
+dpkg-deb -x qemu-user_10.*_amd64.deb ~/pimarchy-tools
+[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ] && echo -1 | sudo tee /proc/sys/fs/binfmt_misc/qemu-aarch64
+printf ':qemu-aarch64:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\xb7\\x00:\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:%s:POCF\n' \
+  "$HOME/pimarchy-tools/usr/bin/qemu-aarch64" | sudo tee /proc/sys/fs/binfmt_misc/register
+sudo pi/build-image --output ~/pimarchy-image
+```
+
+Where binfmt_misc can't be registered, as in an unprivileged container, use the proot runner with proot 5.4 from Debian 13 ([packages.debian.org/trixie/proot](https://packages.debian.org/trixie/proot)) and the qemu unpacked above, both first on the builder's `PATH`:
+
+```bash
 dpkg-deb -x proot_5.4.0-*_amd64.deb ~/pimarchy-tools
-dpkg-deb -x qemu-user-static_10.*_amd64.deb ~/pimarchy-tools
 sudo apt install libtalloc2   # proot's one library
-sudo env PATH="$HOME/pimarchy-tools/usr/bin:$PATH" pi/build-image --output ~/pimarchy-image
+sudo env PATH="$HOME/pimarchy-tools/usr/bin:$PATH" pi/build-image --runner proot --output ~/pimarchy-image
 ```
 
 ### What a build does
@@ -87,7 +101,7 @@ Each step prints a numbered banner, and everything goes to `build.log`:
 
 If a step fails, the build stops there and names the step. Rerun it with `--keep-root` to look inside `DIR/work/root`. The cache keeps every download, so a rerun only repeats the work.
 
-Under proot and qemu-user, a few pacman runs in a hundred die of a heap corruption abort ("double free or corruption"), most of them as they exit; the same pacman under qemu alone does not. The builder runs a crashed pacman or gpg again, runs a failed multi-program step (Omarchy's system setup, the package builds, mkinitcpio) once more, and makes sure the build keyring trusts the keys it needs. A crash inside a package's install script is only reported by pacman, so a build that saw any crash says so at the end; its log shows what each crashed program was doing.
+Under the proot runner, a few pacman runs in a hundred die of a heap corruption abort ("double free or corruption"), most of them as they exit; the same pacman under qemu alone does not. The builder runs a crashed pacman or gpg again, runs a failed multi-program step (Omarchy's system setup, the package builds, mkinitcpio) once more, and makes sure the build keyring trusts the keys it needs. A crash inside a package's install script is only reported by pacman, so a build that saw any crash says so at the end; its log shows what each crashed program was doing.
 
 ## Flashing
 
