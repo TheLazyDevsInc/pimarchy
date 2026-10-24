@@ -19,10 +19,10 @@ This directory builds Pimarchy, this fork's Omarchy for the Raspberry Pi 400, as
 
 `pi/build-image` runs on an x86_64 or aarch64 Linux computer, as root. It needs no loop devices and leaves no mounts behind. It runs every command meant for the image inside the image root, so package installs, scriptlets and Omarchy's own setup run as they would on the Pi, only slower on x86_64. It has two ways to do that, and picks one with `--runner`:
 
-- `chroot`, the default wherever it works: each command runs in a real chroot inside its own private mount namespace, whose mounts (`/proc`, `/sys`, `/dev`, the package cache) go when the command does. On x86_64 the kernel runs the image's aarch64 programs through qemu-user, registered with binfmt_misc. A build took about an hour and a quarter on a 4-core x86_64 host, half of it compressing the image.
+- `chroot`, the default wherever it works: each command runs in a real chroot inside its own private mount namespace, whose mounts go when the command does: this host's `/proc`, a read-only `/sys`, a `/dev` of the build's own that holds only this host's `null`, `zero`, `full`, `random`, `urandom` and `tty` with a private `pts` and `shm`, and the package cache. On x86_64 the kernel runs the image's aarch64 programs through qemu-user, registered with binfmt_misc. A build took about an hour and a quarter on a 4-core x86_64 host, half of it compressing the image.
 - `proot`, for a host that can't register binfmt_misc handlers, such as an unprivileged container: proot maps the image root and runs its programs through qemu-user itself. It traces every system call, so a build takes several hours.
 
-Either way, expect to need about 25 GiB of free disk where `--output` points. Everything the build runs inside the image runs as root on this computer's kernel, with its network, `/dev` and `/sys`. Package scripts and Omarchy's setup are written for the machine they install, so build in a container or a throwaway VM rather than on a computer you care about.
+Either way, expect to need about 25 GiB of free disk where `--output` points. Everything the build runs inside the image runs as root on this computer's kernel, with its network and `/proc` (and under proot its writable `/sys`). Package scripts and Omarchy's setup are written for the machine they install, so build in a container or a throwaway VM rather than on a computer you care about.
 
 ```bash
 sudo pi/build-image --output ~/pimarchy-image
@@ -32,11 +32,11 @@ That builds `HEAD` of the checkout the script lives in, on the stable channel, i
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--output DIR` | `./pimarchy-image` | Where the image, its checksum and `build.log` go. The image root is built in `DIR/work`. |
+| `--output DIR` | `./pimarchy-image` | Where the image, its checksum and `build.log` go. An existing `DIR` keeps its mode. The image root is built in `DIR/work`, which the build marks as its own: it stops rather than touch a `DIR/work` it did not make. |
 | `--size SIZE` | `8G` | The image size, such as `8G` or `7500M`. A size given here that is too small for the system stops the build. |
 | `--channel NAME` | `stable` | Omarchy's channel: `stable`, `rc` or `edge`. |
 | `--source PATH` | this checkout | The Pimarchy checkout to build. |
-| `--ref REF` | `HEAD` | The commit, branch or tag to build. Uncommitted changes are never built. |
+| `--ref REF` | `HEAD` | The commit, branch or tag to build. The image follows origin's copy of the branch it names, local or as `origin/<branch>`; for a tag or a commit, the branch the checkout has checked out, whose copy on origin must already hold it. Uncommitted changes are never built. |
 | `--cache DIR` | `/var/cache/pimarchy-build` | The downloaded Arch Linux ARM tarball and every package, kept for the next build. |
 | `--tarball PATH` | | Use this Arch Linux ARM Raspberry Pi tarball instead of downloading it. A `PATH.md5` next to it is checked. |
 | `--keep-root` | | Keep `DIR/work`, the image root included, for inspection. |
@@ -49,7 +49,7 @@ The Pi updates from the origin of the checkout the image was built from, so buil
 
 The builder checks for all of these before it starts and says what is missing:
 
-- `bsdtar`, `mkfs.vfat` and `fsck.vfat`, `mcopy`, `mke2fs` and `e2fsck` (e2fsprogs 1.43 or newer), `sfdisk`, `findmnt`, `xz`, `git` and `curl`.
+- `bsdtar`, `mkfs.vfat` and `fsck.vfat`, `mcopy`, `mke2fs` and `e2fsck` (e2fsprogs 1.43 or newer), `sfdisk`, `findmnt`, `xz`, `git` (2.28 or newer) and `curl`.
 - For the chroot runner, `unshare`, `mount` and `chroot`, and on an x86_64 host a static qemu-user 10 or newer registered with binfmt_misc for aarch64 with the fix-binary (`F`) flag. The kernel then opens qemu when it is registered, so it runs the image's programs inside a chroot that has no qemu of its own. The builder reads the registration from `/proc/sys/fs/binfmt_misc` and checks the qemu it names.
 - For the proot runner, proot 5.4 or newer, and on an x86_64 host qemu-user 10 or newer, found as `qemu-aarch64-static`, then `qemu-aarch64`. proot 5.1, which Ubuntu 24.04 and Debian 13 ship, does not translate the `faccessat2` system call that Arch Linux ARM's glibc uses, so tests inside the image look at the build host's files.
 - qemu 8.2, which Ubuntu 24.04 ships, crashes on Arch Linux ARM's glibc under either runner. No qemu is needed on an aarch64 host.
@@ -77,7 +77,7 @@ printf ':qemu-aarch64:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\
 sudo pi/build-image --output ~/pimarchy-image
 ```
 
-Where binfmt_misc can't be registered, as in an unprivileged container, use the proot runner. It needs proot 5.4, which Debian has only in forky and sid ([packages.debian.org/sid/proot](https://packages.debian.org/sid/proot)) and Arch only in the AUR. Debian's build needs glibc 2.38, so it runs on Ubuntu 24.04, Debian 13 and newer. Under proot, the image's build account runs programs by their paths on this computer, so qemu (Debian 13's static `qemu-user`, as above), proot and `--output` must sit where other users can reach them (every directory above them searchable by others), not in a private home:
+Where binfmt_misc can't be registered, as in an unprivileged container, use the proot runner. It needs proot 5.4, which Debian has only in forky and sid ([packages.debian.org/sid/proot](https://packages.debian.org/sid/proot)) and Arch only in the AUR. Debian's build needs glibc 2.38, so it runs on Ubuntu 24.04, Debian 13 and newer. Under proot, the image's build account runs programs by their paths on this computer, so qemu (Debian 13's static `qemu-user`, as above) and `--output` must sit where other users can reach them (every directory above them searchable by others, symlinks followed), not in a private home; the builder checks both before it starts. The chroot runner has no such need, so `--output ~/pimarchy-image` is fine there:
 
 ```bash
 sudo mkdir -p /opt/pimarchy-tools
@@ -160,6 +160,6 @@ The Pi has no battery-backed clock, so until it reaches the network its clock st
 
 `omarchy update` works as on any Omarchy machine, with one extra step before the package transaction. `omarchy-update-rpi-pkgs` fast-forwards `/var/lib/pimarchy/src` from its origin, the repository and branch the image was built from. When the checkout has moved, it rebuilds `omarchy`, `omarchy-settings` and `omarchy-rpi-boot` from it, as the user running the update, and publishes them to `[pimarchy]`. That takes a few minutes on the Pi. The transaction then installs them with everything else from Omarchy and Arch Linux ARM. Afterwards the boot package's `update-verify` checks the kernel, initramfs and boot files before the update offers a reboot.
 
-The checkout is an ordinary git clone owned by root, blobless: old file contents are fetched from origin when git needs them. To follow another branch or fork, change it with `sudo git -C /var/lib/pimarchy/src ...` and run `omarchy update`; that also sets where a later switch to the dev channel clones `~/omarchy` from. If the checkout has uncommitted changes, an update leaves it alone and builds nothing until you commit them or set them aside with `sudo git -C /var/lib/pimarchy/src stash`. Local commits that origin lacks are built, with a warning.
+The checkout is an ordinary git clone owned by root, blobless: old file contents are fetched from origin when git needs them. To follow another branch or fork, change it with `sudo git -C /var/lib/pimarchy/src ...` and run `omarchy update`; that also sets where a later switch to the dev channel clones `~/omarchy` from. If the checkout has uncommitted changes or untracked files, an update leaves it alone and builds nothing until you commit them or set them aside with `sudo git -C /var/lib/pimarchy/src stash -u`. Local commits that origin lacks are built, with a warning.
 
 `omarchy-update-firmware` updates the Pi's bootloader EEPROM with `rpi-eeprom-update`.
