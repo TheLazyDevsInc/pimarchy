@@ -770,23 +770,39 @@ src_git() {
 }
 
 resolve_source() {
-  local path
+  local path full_ref
 
   src_git rev-parse --git-dir >/dev/null 2>&1 || fail "--source $source_dir is not a git checkout"
   commit=$(src_git rev-parse --verify --quiet "$ref^{commit}") || fail "--ref $ref names no commit in $source_dir"
 
-  if src_git show-ref --verify --quiet "refs/heads/$ref"; then
-    branch=$ref
-  elif branch=$(src_git symbolic-ref --quiet --short HEAD); then
-    :
-  else
-    fail "$source_dir has no branch checked out; check one out, or pass its name as --ref, so the Pi's checkout has a branch to update"
-  fi
+  # The image's checkout follows origin's copy of its branch: the branch --ref
+  # names, locally or as origin's (origin/quattro), or else, for a tag or a
+  # commit, the branch the source has checked out.
+  full_ref=$(src_git rev-parse --symbolic-full-name "$ref" 2>/dev/null) || full_ref=""
+  case $full_ref in
+    refs/heads/*) branch=${full_ref#refs/heads/} ;;
+    refs/remotes/origin/*) branch=${full_ref#refs/remotes/origin/} ;;
+    *)
+      branch=$(src_git symbolic-ref --quiet --short HEAD) ||
+        fail "$source_dir has no branch checked out; check one out, or pass its name as --ref, so the Pi's checkout has a branch to update"
+      ;;
+  esac
 
   origin_url=$(src_git remote get-url origin 2>/dev/null) ||
     fail "$source_dir has no origin remote: the Pi updates its packages from the image checkout's origin"
   if [[ $origin_url != https://* && $origin_url != http://* ]]; then
     warn "origin is $origin_url; the Pi fetches updates from it as root, so a local path or an SSH URL won't work there"
+  fi
+
+  # The Pi fast-forwards to origin's branch, which has to hold the commit, as
+  # far as the source's last fetch tells: a branch named as --ref may be pushed
+  # after the build, but a branch only guessed from the checkout must hold it.
+  if ! src_git merge-base --is-ancestor "$commit" "refs/remotes/origin/$branch" 2>/dev/null; then
+    if [[ $full_ref == refs/heads/* ]]; then
+      warn "origin/$branch does not hold $commit yet (as $source_dir last fetched it): push $branch before you flash the image, since the Pi follows origin's $branch"
+    else
+      fail "--ref $ref is not on origin/$branch, which the image would follow since $source_dir has $branch checked out: pass the branch to follow as --ref (a local branch or origin/<branch>), or check out a branch origin has it on"
+    fi
   fi
 
   for path in "default/pacman/$platform/pacman-$channel.conf" "default/pacman/$platform/mirrorlist-$channel"; do

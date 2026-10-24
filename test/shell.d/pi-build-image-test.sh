@@ -335,6 +335,43 @@ else
     $(git -C "$dest" config remote.origin.promisor) == "true" && -z $(git -C "$dest" config remote.origin.uploadpack) ]] ||
     fail "the image's checkout fetches what it lacks from the real origin" "$(git -C "$dest" config --list --local)"
   pass "the image's checkout leaves out file contents only older commits have, and fetches them from the real origin"
+
+  # The branch the checkout follows. origin's quattro holds the release, and
+  # the source is on a feature branch origin does not have.
+  ref_source=$TMPDIR/ref-source
+  git init -q -b quattro "$ref_source"
+  mkdir -p "$ref_source/default/pacman/$platform" "$ref_source/bin" "$ref_source/install"
+  touch "$ref_source/default/pacman/$platform/pacman-stable.conf" "$ref_source/default/pacman/$platform/mirrorlist-stable" \
+    "$ref_source/bin/omarchy-pkg-defaults" "$ref_source/install/omarchy-$platform.packages"
+  for package in "${local_packages[@]}"; do
+    mkdir -p "$ref_source/pi/pkgbuilds/$package"
+    touch "$ref_source/pi/pkgbuilds/$package/PKGBUILD"
+  done
+  git -C "$ref_source" add -A
+  git -C "$ref_source" -c user.name=Test -c user.email=test@example.invalid commit -q -m "Release"
+  git -C "$ref_source" tag v4.0.0
+  git -C "$ref_source" remote add origin https://example.invalid/pimarchy.git
+  git -C "$ref_source" update-ref refs/remotes/origin/quattro v4.0.0
+  git -C "$ref_source" checkout -q -b my-feature
+  git -C "$ref_source" -c user.name=Test -c user.email=test@example.invalid commit -q --allow-empty -m "Feature"
+  release=$(git -C "$ref_source" rev-parse v4.0.0)
+  resolve() {
+    (
+      source_dir=$ref_source channel=stable ref=$1
+      resolve_source 2>&1
+    )
+  }
+  output=$(resolve origin/quattro) || fail "--ref origin/quattro builds origin's quattro" "$output"
+  [[ $output == *"Commit: $release "* && $output == *"Branch: quattro,"* ]] ||
+    fail "a remote-tracking --ref gives the image's checkout that branch" "$output"
+  status=0
+  output=$(resolve v4.0.0) || status=$?
+  (( status != 0 )) && [[ $output == *"is not on origin/my-feature"* ]] ||
+    fail "a tag that is not on the checked-out branch at origin is refused" "$output"
+  output=$(resolve HEAD) || fail "a branch origin lacks still builds" "$output"
+  [[ $output == *"Branch: my-feature,"* && $output == *"push my-feature"* ]] ||
+    fail "a branch origin lacks builds with a warning to push it" "$output"
+  pass "a remote-tracking --ref gives the checkout that branch, a tag must be on the checked-out branch at origin, and an unpushed branch builds with a warning"
 fi
 
 # ── The checks on a finished image root ──────────────────────────────────────
