@@ -1695,7 +1695,7 @@ root_problems() (
   [[ $(host_git -C "$root$guest_src" symbolic-ref --short HEAD 2>/dev/null) == "$branch" ]] || problem "$guest_src is not on branch $branch"
   [[ $(host_git -C "$root$guest_src" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) == "origin/$branch" ]] ||
     problem "$guest_src's branch does not track origin/$branch, so the Pi would never fetch it"
-  [[ -z $(host_git -C "$root$guest_src" status --porcelain --untracked-files=no 2>/dev/null) ]] ||
+  [[ -z $(host_git -C "$root$guest_src" status --porcelain --untracked-files=normal 2>/dev/null) ]] ||
     problem "$guest_src has uncommitted changes, so the Pi would never update or build it"
 
   # Sealing.

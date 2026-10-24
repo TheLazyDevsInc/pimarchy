@@ -575,6 +575,9 @@ else
   printf 'edited\n' >>"$checkout/bin/omarchy"
   expect_problem "a checkout with uncommitted changes is refused" "$guest_src has uncommitted changes"
   git -C "$checkout" checkout -q -- bin/omarchy
+  : >"$checkout/bin/omarchy-untracked"
+  expect_problem "a checkout with untracked files is refused, since the Pi's builds would package them" "$guest_src has uncommitted changes"
+  rm "$checkout/bin/omarchy-untracked"
 
   mkdir "$root/etc/pacman.d/gnupg"
   expect_problem "a root that keeps the build's keyring is refused" "the build's pacman keyring is still in the image"
