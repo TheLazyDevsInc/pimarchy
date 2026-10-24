@@ -432,12 +432,19 @@ prepare_output() {
   flock -n "$lock_fd" || fail "another pi/build-image is using $output"
 
   work=$output/work
+  work_mark=$work/.pimarchy-build-work
   root=$work/root
   log_file=$output/build.log
   : >"$log_file"
   exec > >(tee -a "$log_file") 2>&1
   build_started=$SECONDS
   echo "pi/build-image started $(date -u '+%Y-%m-%d %H:%M:%S UTC') on $(uname -n) ($(uname -m))"
+
+  # The build removes its work directory, so it marks the one it makes, and
+  # stops before one it did not make, such as a ~/work under --output ~.
+  if [[ -e $work || -L $work ]] && [[ ! -f $work_mark ]]; then
+    fail "$work was not made by pi/build-image, which removes its work directory: move it, or pick another --output"
+  fi
 }
 
 step_number=0
@@ -456,7 +463,7 @@ cleanup() {
   if (( status != 0 )) && [[ -n $step_name ]]; then
     echo "Error: the build failed in step $step_number ($step_name); see ${log_file:-the output above}" >&2
   fi
-  if [[ -n ${work:-} && -d $work ]]; then
+  if [[ -n ${work_mark:-} && -f $work_mark ]]; then
     if (( keep_root )); then
       echo "Kept the work directory: $work"
     else
@@ -805,10 +812,15 @@ fetch_tarball() {
 # ── 4. Root ──────────────────────────────────────────────────────────────────
 
 extract_root() {
-  rm -rf --one-file-system -- "$work"
+  # Only a work directory the build made carries its mark (see prepare_output).
+  if [[ -f $work_mark ]]; then
+    rm -rf --one-file-system -- "$work"
+  fi
   # Searchable by all: the image's own accounts reach its files through this
   # host path (see check_prerequisites).
-  install -d -m 0755 "$work" "$root"
+  mkdir -m 0755 -- "$work"
+  : >"$work_mark"
+  install -d -m 0755 "$root"
 
   # Numeric owners: the host's user and group names must not remap the image's.
   echo "Extracting $tarball"

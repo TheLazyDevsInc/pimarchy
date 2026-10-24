@@ -180,6 +180,15 @@ modes=$(stat -c '%a' -- "$TMPDIR/home" "$TMPDIR/home/cache")
 [[ $modes == $'700\n755' ]] || fail "an existing output directory keeps its mode, and a missing cache is made searchable" "$modes"
 pass "an existing output directory keeps its mode, and a missing cache is made searchable"
 
+# The build removes its work directory: one it did not make stops it first.
+mkdir "$TMPDIR/home/work"
+printf 'mine\n' >"$TMPDIR/home/work/notes.txt"
+status=0
+output=$(bash -c 'source "$1"; output=$2 cache=$2/cache; prepare_output' bash "$BUILDER" "$TMPDIR/home" 2>&1) || status=$?
+(( status != 0 )) && [[ $output == *"$TMPDIR/home/work was not made by pi/build-image"* && -f $TMPDIR/home/work/notes.txt ]] ||
+  fail "a work directory the build did not make stops the build, and stays" "$output"
+pass "a work directory the build did not make stops the build, and stays"
+
 # ── The kernel swap ──────────────────────────────────────────────────────────
 
 # The family list names the Pi's boot package, which [pimarchy] only has once
