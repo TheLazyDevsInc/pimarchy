@@ -1605,10 +1605,11 @@ validate_root() {
 # ── 17. Pack ─────────────────────────────────────────────────────────────────
 
 # Packs $root into $output/$image_name.img(.xz) without mounts or loop devices:
-# a FAT32 filesystem built from its /boot, an ext4 filesystem built from the
-# rest, both written into an MBR disk image at their partitions' offsets.
+# an MBR disk image, a FAT32 filesystem built from its /boot and copied into
+# partition 1, and an ext4 filesystem built from the rest straight into
+# partition 2, so the root's contents are never held twice.
 pack_image() {
-  local boot_dir=$work/boot boot_img=$work/boot.img root_img=$work/root.img disk=$work/disk.img
+  local boot_dir=$work/boot boot_img=$work/boot.img disk=$work/disk.img
   local boot_bytes root_bytes root_start used_kib needed_bytes boot_mode boot_owner dump image
   local -a boot_entries=()
 
@@ -1646,32 +1647,7 @@ pack_image() {
   fi
   echo "Image: $((image_bytes / 1048576)) MiB; boot partition $boot_mib MiB; root partition $((root_bytes / 1048576)) MiB holding $((used_kib / 1024)) MiB"
 
-  echo "Building the FAT32 boot filesystem"
-  rm -f -- "$boot_img"
-  mkfs.vfat -F 32 -n BOOT -i "$disk_id" -C "$boot_img" $((boot_bytes / 1024)) >/dev/null
-  shopt -s dotglob nullglob
-  boot_entries=("$boot_dir"/*)
-  shopt -u dotglob nullglob
-  (( ${#boot_entries[@]} )) || fail "/boot is empty"
-  MTOOLS_SKIP_CHECK=1 mcopy -s -m -i "$boot_img" "${boot_entries[@]}" ::/ </dev/null
-  fsck.vfat -n "$boot_img" || fail "the boot filesystem does not check clean"
-
-  echo "Building the ext4 root filesystem"
-  rm -f -- "$root_img"
-  truncate -s "$root_bytes" "$root_img"
-  mke2fs -q -F -t ext4 -L pimarchy-root -U "$root_fs_uuid" -E root_owner=0:0 -d "$root" "$root_img"
-  e2fsck -fn "$root_img" || fail "the root filesystem does not check clean"
-
-  # The kept root is the whole image again; otherwise the root's space comes
-  # back before the disk image takes it.
-  if (( keep_root )); then
-    rmdir -- "$root/boot"
-    mv -- "$boot_dir" "$root/boot"
-  else
-    rm -rf --one-file-system -- "$root" "$boot_dir"
-  fi
-
-  echo "Assembling the disk: label-id 0x$disk_id"
+  echo "Partitioning the disk: label-id 0x$disk_id"
   rm -f -- "$disk"
   truncate -s "$image_bytes" "$disk"
   sfdisk --quiet --no-reread --no-tell-kernel "$disk" >/dev/null <<TABLE
@@ -1683,16 +1659,42 @@ sector-size: 512
 start=2048, size=$((boot_bytes / 512)), type=c
 start=$((root_start / 512)), size=$((root_bytes / 512)), type=83
 TABLE
+
+  echo "Building the FAT32 boot filesystem"
+  rm -f -- "$boot_img"
+  mkfs.vfat -F 32 -n BOOT -i "$disk_id" -C "$boot_img" $((boot_bytes / 1024)) >/dev/null
+  shopt -s dotglob nullglob
+  boot_entries=("$boot_dir"/*)
+  shopt -u dotglob nullglob
+  (( ${#boot_entries[@]} )) || fail "/boot is empty"
+  MTOOLS_SKIP_CHECK=1 mcopy -s -m -i "$boot_img" "${boot_entries[@]}" ::/ </dev/null
+  fsck.vfat -n "$boot_img" || fail "the boot filesystem does not check clean"
   dd if="$boot_img" of="$disk" bs=1M seek=1 conv=notrunc,sparse status=none
   rm -f -- "$boot_img"
-  dd if="$root_img" of="$disk" bs=1M seek=$((root_start / 1048576)) conv=notrunc,sparse status=none
-  rm -f -- "$root_img"
+
+  # mke2fs and e2fsck reach partition 2 through the offset its I/O layer adds
+  # to every read and write. Nothing is discarded: the disk image is new, and a
+  # discard there would punch holes in a file, not in a device.
+  echo "Building the ext4 root filesystem in partition 2"
+  mke2fs -q -F -t ext4 -L pimarchy-root -U "$root_fs_uuid" -E "offset=$root_start,root_owner=0:0,nodiscard" \
+    -d "$root" "$disk" "$((root_bytes / 1024))k"
+  e2fsck -fn "$disk?offset=$root_start" || fail "the root filesystem does not check clean"
+
+  # The kept root is the whole image again; otherwise the root's space comes
+  # back before the image is compressed.
+  if (( keep_root )); then
+    rmdir -- "$root/boot"
+    mv -- "$boot_dir" "$root/boot"
+  else
+    rm -rf --one-file-system -- "$root" "$boot_dir"
+  fi
 
   dump=$(sfdisk --dump "$disk")
   grep -q "^label-id: 0x$disk_id$" <<<"$dump" &&
     grep -q "start= *2048, size= *$((boot_bytes / 512)), type=c$" <<<"$dump" &&
     grep -q "start= *$((root_start / 512)), size= *$((root_bytes / 512)), type=83$" <<<"$dump" ||
     fail "the disk's partition table is not the one written: $dump"
+  (( $(stat -c %s -- "$disk") == image_bytes )) || fail "the disk image is not $image_bytes bytes"
 
   image=$output/$image_name.img
   rm -f -- "$image" "$image.xz" "$image.sha256" "$image.xz.sha256"
