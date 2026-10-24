@@ -1,61 +1,118 @@
 # Pimarchy: Omarchy on the Raspberry Pi 400
 
-This tree holds the build tooling for porting Omarchy to the Raspberry Pi
-400. Like `test/`, `docs/`, and `plans/`, it ships in neither the `omarchy`
-nor `omarchy-settings` package — it is not part of the running system.
+This directory builds Pimarchy, this fork's Omarchy for the Raspberry Pi 400, as an SD card image. Like `test/`, `docs/` and `plans/`, it ships in no package. [`docs/raspberry-pi.md`](../docs/raspberry-pi.md) explains how Omarchy runs on the Pi, and [`plans/pi-400-port.md`](../plans/pi-400-port.md) explains why it is built this way.
 
-The full plan, with every task and its rationale, lives at
-[`plans/pi-400-port.md`](../plans/pi-400-port.md).
+- `build-image` builds the image.
+- `pkgbuilds/` holds the PKGBUILDs the Pi builds its Omarchy packages from: `omarchy` and `omarchy-settings`, vendored from upstream, and `omarchy-rpi-boot`, the Pi's boot package.
+- `rpi-boot/` holds the boot package's sources.
 
-## Hardware target
+## The image
 
-Only the Raspberry Pi 400 is supported. It does not need to run on anything
-under a Pi 400. Concretely, that means:
+`pimarchy-<version>-<channel>-<date>-g<commit>.img.xz` is a whole SD card: an MBR disk with a 512 MiB FAT32 boot partition and an ext4 root partition, which grows to fill the card on the first boot. It is Arch Linux ARM's Raspberry Pi root filesystem turned into Omarchy:
 
-- Broadcom BCM2711, quad-core Cortex-A72 (ARMv8-A — **not** the newer
-  ARMv8.2 that Arch Linux's own `aarch64` port now targets)
-- 4 GB RAM
-- VideoCore VI, exposed as two DRM devices: `vc4` (display/KMS, owns both
-  connectors) and `v3d` (render-only)
-- Dual micro-HDMI output, no HDMI audio jack workaround needed — there is
-  no 3.5 mm jack on this board at all, audio is HDMI/USB/Bluetooth only
-- No battery, no backlight, no DMI (`/sys/class/dmi/id` does not exist),
-  no PCI bus, no UEFI
-- Built-in USB keyboard (the Pi 400 *is* a keyboard) with no media keys
+- The kernel is `linux-rpi`, booted by the Pi's own firmware from the boot partition (`config.txt`, `cmdline.txt`, `kernel8.img`). There is no U-Boot, Limine or UEFI.
+- Omarchy's packages come from Omarchy's aarch64 repository and Omarchy's mirror of Arch Linux ARM, except `omarchy`, `omarchy-settings` and `omarchy-rpi-boot`. The image builds those three from this repository into a local repository, `[pimarchy]` at `/var/lib/pimarchy/repo`, which `pacman.conf` lists first.
+- The image carries the Pimarchy checkout it was built from, at `/var/lib/pimarchy/src`. It is on the branch the image was built from, and that branch tracks the `origin` of the checkout the image was built from. The Pi rebuilds its Omarchy packages from it on every update.
+- Nothing in it belongs to one machine: there is no user account, the root account is locked, and there is no machine ID, no SSH host key and no pacman keyring. The hardware setup an install would run is queued for the Pi's first boot, so it runs on the Pi rather than on the computer that built the image.
 
-## Base OS
+## Building an image
 
-[Arch Linux ARM](https://archlinuxarm.org/) `aarch64`, with the `linux-rpi`
-kernel. Arch Linux ARM already ships prebuilt `hyprland`, `quickshell`,
-`mesa`, and `vulkan-broadcom` for aarch64 — the reason this port is
-tractable at all is that none of the hard graphics-stack dependencies need
-to be built from source.
+`pi/build-image` runs on an x86_64 or aarch64 Linux computer, as root. It needs no mounts or loop devices, so it also runs in a container. It runs every command meant for the image inside the image root, using proot and, on x86_64, qemu-user. Package installs, scriptlets and Omarchy's own setup therefore run as they would on the Pi, only much slower. Expect a build to take a few hours on x86_64, and to need about 25 GiB of free disk where `--output` points.
 
-Omarchy itself installs as two pacman packages built locally on the Pi (see
-Phase 4 of the plan) into a local `file://` repository, rather than
-depending on the x86_64-only `pkgs.omarchy.org`.
+```bash
+sudo pi/build-image --output ~/pimarchy-image
+```
 
-## Workflows
+That builds `HEAD` of the checkout the script lives in, on the stable channel, into an 8 GiB image. If the installed system doesn't fit in 8 GiB, the image grows to the next whole GiB that fits it. The output directory then holds the image, its `.sha256` and `build.log`.
 
-**`pi/bootstrap`** (not yet implemented — see Phases 3–9 of the plan) turns
-a stock Arch Linux ARM install into Pimarchy. This is the iteration loop:
-flash Arch Linux ARM aarch64, run the bootstrap script, test, and if
-something's wrong, reflash and repeat. Minutes per cycle, not an image
-rebuild.
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--output DIR` | `./pimarchy-image` | Where the image, its checksum and `build.log` go. The image root is built in `DIR/work`. |
+| `--size SIZE` | `8G` | The image size, such as `8G` or `7500M`. A size given here that is too small for the system stops the build. |
+| `--channel NAME` | `stable` | Omarchy's channel: `stable`, `rc` or `edge`. |
+| `--source PATH` | this checkout | The Pimarchy checkout to build. |
+| `--ref REF` | `HEAD` | The commit, branch or tag to build. Uncommitted changes are never built. |
+| `--cache DIR` | `/var/cache/pimarchy-build` | The downloaded Arch Linux ARM tarball and every package, kept for the next build. |
+| `--tarball PATH` | | Use this Arch Linux ARM Raspberry Pi tarball instead of downloading it. A `PATH.md5` next to it is checked. |
+| `--keep-root` | | Keep `DIR/work`, the image root included, for inspection. |
+| `--no-compress` | | Write a plain `.img` instead of `.img.xz`. |
 
-**`pi/build-image`** (not yet implemented — see Phase 10 of the plan) bakes
-the result into a flashable `pimarchy-<version>-aarch64.img.xz`, with
-deferred provisioning armed so a fresh flash boots straight into the
-existing `omarchy-provision-owner` first-run wizard (keyboard, username,
-password, hostname, timezone) rather than a bare shell.
+The Pi updates from the origin of the checkout the image was built from, so build from a checkout whose `origin` is an `https://` URL the Pi can fetch, such as the fork on GitHub, and push the branch before you flash. The image is built from the committed state of `--ref`, not from the working tree.
 
-## What's here now
+### Prerequisites
 
-- `config.txt` / `cmdline.txt` — the Raspberry Pi firmware boot templates
-  that `omarchy-refresh-rpi-boot` (not yet implemented) will install to
-  `/boot`, replacing the Limine/UKI chain a Pi has no UEFI to run.
+The builder checks for all of these before it starts and says what is missing:
 
-Everything else in the plan — the pacman repo, the package builds, the
-hardware detectors, the Hyprland/Quickshell fixes, the install pipeline
-integration, and the image builder — is tracked in
-[`plans/pi-400-port.md`](../plans/pi-400-port.md) and lands incrementally.
+- `bsdtar`, `mkfs.vfat` and `fsck.vfat`, `mcopy`, `mke2fs` and `e2fsck` (e2fsprogs 1.43 or newer), `sfdisk`, `findmnt`, `xz`, `git` and `curl`.
+- proot 5.4 or newer. proot 5.1, which Ubuntu 24.04 still ships, does not translate the `faccessat2` system call that Arch Linux ARM's glibc uses, so tests inside the image look at the build host's files.
+- On an x86_64 host, qemu-user 10 or newer. The builder looks for `qemu-aarch64-static`, then `qemu-aarch64`. qemu 8.2, which Ubuntu 24.04 ships, crashes on Arch Linux ARM's glibc. No qemu is needed on an aarch64 host.
+
+On Arch Linux:
+
+```bash
+sudo pacman -S --needed libarchive dosfstools mtools e2fsprogs util-linux xz git curl proot qemu-user-static
+```
+
+On Debian 13 (trixie) or newer, whose proot and qemu are new enough:
+
+```bash
+sudo apt install libarchive-tools dosfstools mtools e2fsprogs fdisk util-linux xz-utils git curl proot qemu-user-static
+```
+
+On Ubuntu 24.04 or Debian 12, install everything above except `proot` and `qemu-user-static`, then take those two from Debian 13 without installing them. Download `proot` and `qemu-user-static` for your architecture from [packages.debian.org/trixie/proot](https://packages.debian.org/trixie/proot) and [packages.debian.org/trixie/qemu-user-static](https://packages.debian.org/trixie/qemu-user-static), then unpack them and put them first on the builder's `PATH`:
+
+```bash
+mkdir -p ~/pimarchy-tools
+dpkg-deb -x proot_5.4.0-*_amd64.deb ~/pimarchy-tools
+dpkg-deb -x qemu-user-static_10.*_amd64.deb ~/pimarchy-tools
+sudo apt install libtalloc2   # proot's one library
+sudo env PATH="$HOME/pimarchy-tools/usr/bin:$PATH" pi/build-image --output ~/pimarchy-image
+```
+
+### What a build does
+
+Each step prints a numbered banner, and everything goes to `build.log`:
+
+1. It checks the prerequisites, resolves `--ref`, and makes sure the checkout has the Pi's pacman templates and PKGBUILDs.
+2. It downloads Arch Linux ARM's `ArchLinuxARM-rpi-aarch64-latest.tar.gz` (about 850 MB, checked against its `.md5`) and extracts it as root, so the image's files keep their real owners and modes. Arch Linux ARM serves both over plain HTTP. For a stronger check, verify the tarball's `.sig` against Arch Linux ARM's signing key yourself and pass it with `--tarball`.
+3. It writes the image-target manifest (`/var/lib/omarchy/image/target`, `platform=aarch64-rpi`), so everything that asks which computer this is gets the Pi's answer.
+4. It clones the checkout into `/var/lib/pimarchy/src`, installs the Pi's `pacman.conf` for the channel, creates a pacman keyring for the build, swaps `linux-aarch64` and U-Boot for `linux-rpi`, and upgrades the root.
+5. It builds `omarchy-settings`, `omarchy` and `omarchy-rpi-boot` from the clone as a temporary user, using the checkout's own `omarchy-update-rpi-pkgs`, and publishes them to `[pimarchy]`.
+6. It installs Omarchy the way the ISO does: `omarchy-settings` and the keyrings first, then LuaRocks, then the Neovim config, then `omarchy`, the boot package and the default set from `omarchy-pkg-defaults aarch64-rpi`.
+7. It removes Arch Linux ARM's `alarm` account, locks root, and turns off its SSH daemon and systemd-networkd setup. Then it runs `omarchy-apply-system --defer-provisioning --first-install`, which sets the system up and queues every hardware step for the first boot.
+8. It writes `cmdline.txt`, `config.txt` and `fstab` for the image's own partition IDs, using the boot package's `setup-boot`, and builds a generic initramfs. It then arms the first-boot root grower and owner setup.
+9. It seals the root: no keyring, machine ID, host keys, logs, caches or build tools are left. It then checks everything above before it packs the boot and root filesystems into the disk image without mounting anything.
+
+If a step fails, the build stops there and names the step. Rerun it with `--keep-root` to look inside `DIR/work/root`. The cache keeps every download, so a rerun only repeats the work.
+
+Under proot and qemu-user, a few pacman runs in a hundred die of a heap corruption abort ("double free or corruption"), most of them as they exit; the same pacman under qemu alone does not. The builder runs a crashed pacman or gpg again, runs a failed multi-program step (Omarchy's system setup, the package builds, mkinitcpio) once more, and makes sure the build keyring trusts the keys it needs. A crash inside a package's install script is only reported by pacman, so a build that saw any crash says so at the end; its log shows what each crashed program was doing.
+
+## Flashing
+
+Check the image, find the SD card's device (`lsblk` lists it, `/dev/sdX` or `/dev/mmcblkX`), and write the image to the whole card, not to a partition:
+
+```bash
+sha256sum -c pimarchy-*.img.xz.sha256
+xzcat pimarchy-*.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+Raspberry Pi Imager works too: choose "Use custom" under the operating system and pick the `.img.xz`. Answer no when it offers OS customisation. That customisation is meant for Raspberry Pi OS, and it edits `cmdline.txt` to run its own first-boot script. balenaEtcher writes the image unchanged.
+
+## The first boot
+
+Connect a monitor to the micro-HDMI port next to the power socket, then power on. The first boot takes a few minutes; don't cut the power while it runs. It needs no network:
+
+1. The root partition and its filesystem grow to fill the card.
+2. The queued hardware setup runs on the Pi: it creates the Pi's own pacman keyring, sets up its audio, sleep, network, Vulkan and boot files, and rebuilds the initramfs for its hardware.
+3. The setup screen on the first console asks for your keyboard layout, your account and password, the computer's name, and the timezone.
+4. It logs you into Hyprland once. From the next boot on, the login screen asks for your password.
+
+The Pi has no battery-backed clock, so until it reaches the network its clock starts from the time the image was built. Wi-Fi is set up from Omarchy's network menu. SSH stays off, as on any Omarchy install. To turn it on, run `sudo systemctl enable --now sshd` and `sudo ufw allow ssh`.
+
+## Updates on the Pi
+
+`omarchy update` works as on any Omarchy machine, with one extra step before the package transaction. `omarchy-update-rpi-pkgs` fast-forwards `/var/lib/pimarchy/src` from its origin, the repository and branch the image was built from. When the checkout has moved, it rebuilds `omarchy`, `omarchy-settings` and `omarchy-rpi-boot` from it, as the user running the update, and publishes them to `[pimarchy]`. That takes a few minutes on the Pi. The transaction then installs them with everything else from Omarchy and Arch Linux ARM. Afterwards the boot package's `update-verify` checks the kernel, initramfs and boot files before the update offers a reboot.
+
+The checkout is an ordinary git clone owned by root. To follow another branch or fork, change it with `sudo git -C /var/lib/pimarchy/src ...` and run `omarchy update`. If the checkout has local changes or commits that origin lacks, it is not fast-forwarded and its packages are built from what is there.
+
+`omarchy-update-firmware` updates the Pi's bootloader EEPROM with `rpi-eeprom-update`.
