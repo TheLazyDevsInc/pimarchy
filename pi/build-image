@@ -1,0 +1,1612 @@
+#!/bin/bash
+
+# Builds a flashable Pimarchy SD card image for the Raspberry Pi 400 from Arch
+# Linux ARM's Raspberry Pi root filesystem (docs/raspberry-pi.md, pi/README.md).
+#
+# It runs as root on an x86_64 or aarch64 host and needs neither mounts nor loop
+# devices: proot maps the image root and qemu-user runs its aarch64 binaries
+# (no qemu on an aarch64 host), so every package, scriptlet and Omarchy setup
+# step runs inside the image as it would on the Pi. Running as real root keeps
+# the ownership and modes set inside the image, which mke2fs -d then copies as
+# they are.
+#
+# The root is turned into Pimarchy through the entry points an Omarchy ISO
+# install uses: the image-target manifest (install/helpers/image-target.sh)
+# names aarch64-rpi, so hardware setup is queued for the Pi's first boot;
+# Omarchy's packages are built from a clone of the Pimarchy checkout into the
+# local [pimarchy] repository; omarchy-apply-system runs with deferred
+# provisioning; and owner setup is armed for tty1. The result is packed into a
+# two-partition MBR image: a FAT32 /boot and an ext4 root that grows to fill the
+# card on the first boot.
+#
+# Sourcing this file only defines its functions (test/shell.d/pi-build-image-test.sh).
+
+set -euo pipefail
+shopt -s inherit_errexit
+
+alarm_url=http://os.archlinuxarm.org/os/ArchLinuxARM-rpi-aarch64-latest.tar.gz
+platform=aarch64-rpi
+kernel_package=linux-rpi
+# Partition 1 starts 1 MiB into the disk and holds the firmware, kernel, device
+# trees, overlays and initramfs, which take well under 100 MiB.
+boot_mib=512
+build_user=pimarchy-build
+local_packages=(omarchy-settings omarchy omarchy-rpi-boot)
+guest_src=/var/lib/pimarchy/src
+guest_repo=/var/lib/pimarchy/repo
+guest_build=/var/tmp/pimarchy-build
+guest_scratch=/tmp/pimarchy-build
+omarchy_key=40DFB630FF42BCFFB047046CF0134EE680CAC571
+alarm_key=68B3537F39A313B3E574D06777193F152BDBE6A6
+mkinitcpio_hook=90-mkinitcpio-install.hook
+step_total=17
+guest_session_lost=0
+
+usage() {
+  cat <<USAGE
+Usage: pi/build-image [options]
+
+Builds a Pimarchy SD card image for the Raspberry Pi 400. Runs as root.
+
+Options:
+  --output DIR      Where the image, its checksum and build.log go
+                    (default: ./pimarchy-image)
+  --size SIZE       Image size, such as 8G or 7500M (default: 8G, or the
+                    next whole GiB the root fits in); the root partition
+                    grows to fill the card on the first boot
+  --channel NAME    Omarchy channel: stable, rc or edge (default: stable)
+  --source PATH     The Pimarchy checkout to build (default: the one this
+                    script lives in)
+  --ref REF         The commit, branch or tag of the checkout (default: HEAD)
+  --cache DIR       Download and package cache, reused across runs
+                    (default: /var/cache/pimarchy-build)
+  --tarball PATH    Use this Arch Linux ARM Raspberry Pi tarball instead of
+                    downloading it
+  --keep-root       Keep the work directory, image root included, for
+                    inspection
+  --no-compress     Leave the image uncompressed (.img instead of .img.xz)
+  -h, --help        Show this help
+USAGE
+}
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "Warning: $*" >&2
+}
+
+# ── Options ──────────────────────────────────────────────────────────────────
+
+# Prints SIZE (a number with an optional K, M, G or T suffix, binary units) in
+# bytes, rounded down to whole MiB.
+parse_size() {
+  local size=${1^^} number unit factor
+
+  size=${size%IB}
+  size=${size%B}
+  if [[ ! $size =~ ^([0-9]+)([KMGT]?)$ ]]; then
+    return 1
+  fi
+  number=$((10#${BASH_REMATCH[1]}))
+  unit=${BASH_REMATCH[2]}
+  case $unit in
+    K) factor=1024 ;;
+    M) factor=$((1024 ** 2)) ;;
+    G) factor=$((1024 ** 3)) ;;
+    T) factor=$((1024 ** 4)) ;;
+    *) factor=1 ;;
+  esac
+  echo $((number * factor / 1048576 * 1048576))
+}
+
+parse_options() {
+  output=$PWD/pimarchy-image
+  size_text=8G
+  size_explicit=0
+  channel=stable
+  source_dir=""
+  ref=HEAD
+  cache=/var/cache/pimarchy-build
+  tarball_opt=""
+  keep_root=0
+  compress=1
+
+  while (( $# )); do
+    case $1 in
+      --output | --size | --channel | --source | --ref | --cache | --tarball)
+        if (( $# < 2 )) || [[ -z $2 ]]; then
+          usage >&2
+          fail "$1 needs a value"
+        fi
+        case $1 in
+          --output) output=$2 ;;
+          --size)
+            size_text=$2
+            size_explicit=1
+            ;;
+          --channel) channel=$2 ;;
+          --source) source_dir=$2 ;;
+          --ref) ref=$2 ;;
+          --cache) cache=$2 ;;
+          --tarball) tarball_opt=$2 ;;
+        esac
+        shift 2
+        ;;
+      --keep-root)
+        keep_root=1
+        shift
+        ;;
+      --no-compress)
+        compress=0
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        usage >&2
+        fail "unknown option: $1"
+        ;;
+    esac
+  done
+
+  case $channel in
+    stable | rc | edge) ;;
+    *) fail "--channel must be stable, rc or edge, not $channel" ;;
+  esac
+
+  image_bytes=$(parse_size "$size_text") || fail "--size must be a size such as 8G or 7500M, not $size_text"
+  if (( image_bytes < (boot_mib + 1 + 256) * 1048576 )); then
+    fail "--size $size_text leaves no room for a root partition beside the $boot_mib MiB boot partition"
+  fi
+
+  if [[ -z $source_dir ]]; then
+    source_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)
+  fi
+  [[ -d $source_dir ]] || fail "--source $source_dir is not a directory"
+  source_dir=$(cd -- "$source_dir" && pwd -P)
+
+  if [[ -n $tarball_opt ]]; then
+    [[ -f $tarball_opt ]] || fail "--tarball $tarball_opt is not a file"
+    tarball_opt=$(readlink -f -- "$tarball_opt")
+  fi
+
+  [[ $output == /* ]] || output=$PWD/$output
+  [[ $cache == /* ]] || cache=$PWD/$cache
+  output=${output%/}
+  cache=${cache%/}
+  [[ -n $output && -n $cache ]] || fail "--output and --cache cannot be /"
+}
+
+require_root() {
+  if (( EUID != 0 )); then
+    fail "pi/build-image must run as root: the image's files need their real owners and modes, which only root can set"
+  fi
+}
+
+# ── Prerequisites ────────────────────────────────────────────────────────────
+
+# Whether version $1 is at least $2 (dotted numbers).
+version_at_least() {
+  [[ $(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1) == "$2" ]]
+}
+
+# proot before 5.4 does not translate faccessat2, which Arch Linux ARM's glibc
+# uses for every access check, so tests like [[ -x ]] inside the image look at
+# the host instead. Distribution builds don't always print a version (Debian's
+# 5.4 prints none), so then this asks the question directly: through proot,
+# does an access check on a path that exists only inside the mapped root find it?
+proot_works() {
+  local probe status=0
+
+  proot_version=$(proot --version 2>&1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || proot_version=""
+  if [[ -n $proot_version ]]; then
+    version_at_least "$proot_version" 5.4
+    return
+  fi
+
+  probe=$(mktemp -d)
+  install -m 0755 /dev/null "$probe/probe"
+  PROOT_NO_SECCOMP=1 proot -b "$probe:/pimarchy-proot-probe" /bin/bash -c '[[ -x /pimarchy-proot-probe/probe ]]' \
+    >/dev/null 2>&1 || status=$?
+  rm -rf -- "$probe"
+  return "$status"
+}
+
+check_prerequisites() {
+  local tool problems=() missing=() version machine target_dir fs_type fs_options avail_kib dir
+
+  # The tools each package provides, for the message.
+  local -A hints=(
+    [bsdtar]="libarchive (Debian, Ubuntu: libarchive-tools)"
+    [mkfs.vfat]="dosfstools"
+    [fsck.vfat]="dosfstools"
+    [mcopy]="mtools"
+    [mke2fs]="e2fsprogs"
+    [e2fsck]="e2fsprogs"
+    [sfdisk]="util-linux (Debian, Ubuntu: fdisk)"
+    [findmnt]="util-linux"
+    [xz]="xz (Debian, Ubuntu: xz-utils)"
+    [git]="git"
+    [curl]="curl"
+    [proot]="proot 5.4 or newer"
+  )
+
+  for tool in bsdtar mkfs.vfat fsck.vfat mcopy mke2fs e2fsck sfdisk findmnt xz git curl proot; do
+    if ! command -v "$tool" >/dev/null; then
+      missing+=("$tool, from ${hints[$tool]}")
+    fi
+  done
+  for tool in "${missing[@]}"; do
+    problems+=("missing $tool")
+  done
+
+  if command -v proot >/dev/null && ! proot_works; then
+    problems+=("proot ${proot_version:-(which prints no version)} does not translate faccessat2, which Arch Linux ARM's glibc uses: install proot 5.4 or newer (Arch: extra/proot; Debian 13: proot; elsewhere unpack Debian's proot_5.4.0 .deb, see pi/README.md)")
+  fi
+
+  if command -v mke2fs >/dev/null; then
+    version=$(mke2fs -V 2>&1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || version=""
+    if [[ -z $version ]] || ! version_at_least "$version" 1.43; then
+      problems+=("mke2fs ${version:-of an unknown version} can't build a filesystem from a directory (-d): e2fsprogs 1.43 or newer is needed")
+    fi
+  fi
+
+  machine=$(uname -m)
+  qemu_bin=""
+  if [[ $machine != "aarch64" ]]; then
+    qemu_bin=$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)
+    if [[ -z $qemu_bin ]]; then
+      problems+=("missing qemu-aarch64 (or qemu-aarch64-static), the user-mode emulator that runs the image's aarch64 binaries on this $machine host: install qemu-user 10 or newer (Arch: qemu-user; Debian 13: qemu-user; see pi/README.md)")
+    else
+      version=$("$qemu_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || version=""
+      if [[ -z $version ]] || ! version_at_least "$version" 9.0; then
+        problems+=("$qemu_bin is qemu ${version:-of an unknown version}; qemu-user 8.2 crashes on Arch Linux ARM's glibc: install qemu-user 10 or newer (see pi/README.md)")
+      elif ! version_at_least "$version" 10.0; then
+        warn "$qemu_bin is qemu $version; only qemu-user 10 has been seen to run Arch Linux ARM's glibc"
+      fi
+    fi
+  fi
+
+  # The work directory holds the image root: its filesystem must keep owners
+  # and modes, and let qemu map the image's binaries.
+  target_dir=$output
+  while [[ ! -e $target_dir ]]; do
+    target_dir=$(dirname -- "$target_dir")
+  done
+  if command -v findmnt >/dev/null; then
+    read -r fs_type fs_options < <(findmnt -n -o FSTYPE,OPTIONS --target "$target_dir") || true
+    case ${fs_type:-} in
+      vfat | exfat | msdos | ntfs | ntfs3 | fuseblk | 9p | cifs | smb3)
+        problems+=("$output is on a $fs_type filesystem, which can't hold the image root's owners and modes")
+        ;;
+    esac
+    if [[ ,${fs_options:-}, == *,noexec,* ]]; then
+      problems+=("$output is on a filesystem mounted noexec, where the image's binaries can't run")
+    fi
+  fi
+
+  # Programs inside the image that run as one of its own accounts (makepkg as
+  # the build user, scriptlets through runuser) open the image's files through
+  # their path on this host, so every directory above the image root must let
+  # anyone through.
+  dir=$target_dir
+  while [[ -n $dir ]]; do
+    if (( ! (8#$(stat -c '%a' -- "$dir") & 1) )); then
+      problems+=("$dir is not searchable by other users, so the image's own accounts can't reach the image root under $output: chmod o+x it, or pick another --output")
+    fi
+    if [[ $dir == "/" ]]; then
+      dir=""
+    else
+      dir=$(dirname -- "$dir")
+    fi
+  done
+
+  if (( ${#problems[@]} )); then
+    printf 'Error: %s\n' "${problems[@]}" >&2
+    return 1
+  fi
+
+  proot_bin=$(command -v proot)
+  echo "proot: $proot_bin"
+  if [[ -n $qemu_bin ]]; then
+    echo "qemu: $qemu_bin ($("$qemu_bin" --version | head -1))"
+  else
+    echo "qemu: not needed on an aarch64 host"
+  fi
+  # The root, its filesystem image and the disk image each take about as much
+  # as the installed system.
+  read -r avail_kib < <(df -k --output=avail -- "$target_dir" | tail -1)
+  if (( avail_kib < 25 * 1024 * 1024 )); then
+    warn "$output has $((avail_kib / 1024 / 1024)) GiB free; a full build takes about 25 GiB"
+  else
+    echo "Free space for the build: $((avail_kib / 1024 / 1024)) GiB"
+  fi
+}
+
+# ── Output, log and cleanup ──────────────────────────────────────────────────
+
+prepare_output() {
+  install -d -m 0755 -- "$output" "$cache"
+  exec {lock_fd}>"$output/.build.lock"
+  flock -n "$lock_fd" || fail "another pi/build-image is using $output"
+
+  work=$output/work
+  root=$work/root
+  log_file=$output/build.log
+  : >"$log_file"
+  exec > >(tee -a "$log_file") 2>&1
+  build_started=$SECONDS
+  echo "pi/build-image started $(date -u '+%Y-%m-%d %H:%M:%S UTC') on $(uname -n) ($(uname -m))"
+}
+
+step_number=0
+step_name=""
+step() {
+  step_number=$((step_number + 1))
+  step_name=$1
+  printf '\n==> [%d/%d] %s (%s)\n' "$step_number" "$step_total" "$step_name" "$(date '+%H:%M:%S')"
+}
+
+cleanup() {
+  local status=$?
+
+  set +e
+  trap - EXIT
+  if (( status != 0 )) && [[ -n $step_name ]]; then
+    echo "Error: the build failed in step $step_number ($step_name); see ${log_file:-the output above}" >&2
+  fi
+  if [[ -n ${work:-} && -d $work ]]; then
+    if (( keep_root )); then
+      echo "Kept the work directory: $work"
+    else
+      if (( status != 0 )); then
+        echo "Removing the work directory; pass --keep-root to keep it for inspection"
+      fi
+      rm -rf --one-file-system -- "$work"
+    fi
+  fi
+  exit "$status"
+}
+
+# ── Running commands inside the image ────────────────────────────────────────
+
+# The session every guest command runs in. proot returns only once every
+# process it traced has exited, and pacman-key leaves gpg-agent (and dirmngr)
+# running, so the session stops them before it returns: through gpgconf, and,
+# since gpgconf itself can crash under emulation, by the mark every process of
+# the session inherits (PIMARCHY_GUEST_SESSION, read from the host's /proc with
+# shell builtins alone).
+guest_session='status=0
+"$@" || status=$?
+mkdir -p /tmp/pimarchy-build && printf "%s\n" "$status" >"/tmp/pimarchy-build/status-$PIMARCHY_GUEST_SESSION"
+if [[ -d /etc/pacman.d/gnupg ]]; then
+  for attempt in 1 2 3; do
+    gpgconf --homedir /etc/pacman.d/gnupg --kill all >/dev/null 2>&1 && break
+  done
+fi
+mark=PIMARCHY_GUEST_SESSION=$PIMARCHY_GUEST_SESSION
+for signal in TERM TERM TERM KILL; do
+  left=()
+  for environ in /proc/[0-9]*/environ; do
+    pid=${environ#/proc/}
+    pid=${pid%/environ}
+    (( pid != $$ && pid != PPID )) || continue
+    mapfile -d "" entries 2>/dev/null <"$environ" || continue
+    for entry in "${entries[@]}"; do
+      if [[ $entry == "$mark" ]]; then
+        left+=("$pid")
+        break
+      fi
+    done
+  done
+  (( ${#left[@]} )) || break
+  echo "pi/build-image: stopping what the session left running: ${left[*]}" >&2
+  kill -s "$signal" "${left[@]}" 2>/dev/null
+  sleep 1
+done
+exit "$status"'
+
+# The environment inside the image: a clean one, plus this host's proxy
+# settings and, when this host names its own CA bundle (a TLS-inspecting
+# proxy), a copy of that bundle.
+prepare_guest_env() {
+  local name ca=""
+
+  guest_env=(HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/bin LANG=C.UTF-8 TERM=dumb)
+  for name in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
+    if [[ -n ${!name:-} ]]; then
+      guest_env+=("$name=${!name}")
+    fi
+  done
+  for name in SSL_CERT_FILE CURL_CA_BUNDLE; do
+    if [[ -z $ca && -n ${!name:-} && -f ${!name} ]]; then
+      ca=${!name}
+    fi
+  done
+  if [[ -n $ca ]]; then
+    install -d -m 0755 "$root$guest_scratch"
+    install -m 0644 -- "$ca" "$root$guest_scratch/ca-bundle.crt"
+    guest_env+=(
+      "SSL_CERT_FILE=$guest_scratch/ca-bundle.crt"
+      "CURL_CA_BUNDLE=$guest_scratch/ca-bundle.crt"
+      "GIT_SSL_CAINFO=$guest_scratch/ca-bundle.crt"
+    )
+    echo "Passing this host's CA bundle ($ca) into the image for the build"
+  fi
+}
+
+# Runs a command inside the image root and returns its exit status. proot maps
+# the host's /proc, /dev and /sys and its resolver config (but not /run: the
+# image must not look booted, so systemctl works on unit files and
+# omarchy-hw-platform answers from the manifest), and the package cache, so
+# downloads survive the run.
+#
+# The session records the command's status before it cleans up, since the
+# session's own shell can crash under emulation too, after the command is
+# done: proot then exits 255. A session that recorded nothing never finished
+# its command, and guest_session_lost says so.
+guest() {
+  local session status_file proot_status=0
+  session=$(od -An -N8 -tx8 /dev/urandom | tr -d '[:space:]')
+  status_file=$root$guest_scratch/status-$session
+  local -a proot_command=(env -i "${guest_env[@]}" PIMARCHY_GUEST_SESSION="$session" PROOT_NO_SECCOMP=1 "$proot_bin")
+
+  if [[ -n $qemu_bin ]]; then
+    proot_command+=(-q "$qemu_bin")
+  fi
+  proot_command+=(-r "$root" -b /proc -b /dev -b /sys)
+  if [[ -e /etc/resolv.conf ]]; then
+    proot_command+=(-b /etc/resolv.conf)
+  fi
+  proot_command+=(-b "$package_cache:/var/cache/pacman/pkg" -w / /usr/bin/bash -c "$guest_session" pimarchy-guest "$@")
+  "${proot_command[@]}" </dev/null || proot_status=$?
+
+  guest_session_lost=0
+  if [[ -f $status_file ]]; then
+    read -r proot_status <"$status_file" || proot_status=255
+    rm -f -- "$status_file"
+    [[ $proot_status =~ ^[0-9]+$ ]] || proot_status=255
+  elif (( proot_status != 0 )); then
+    guest_session_lost=1
+    warn "the session running $1 inside the image ended without finishing it (exit status $proot_status)"
+  fi
+  return "$proot_status"
+}
+
+# Under proot and qemu-user, pacman, and gpg with it, now and then dies of a
+# heap corruption abort ("double free or corruption"): a few pacman runs in a
+# hundred. A run that dies that way (SIGABRT or SIGSEGV) runs again, once its
+# leftover database lock is gone; any other failure stands.
+guest_retry() {
+  local attempt status=0
+
+  for attempt in 1 2 3 4; do
+    status=0
+    guest "$@" || status=$?
+    if (( status != 134 && status != 139 && ! guest_session_lost )); then
+      return "$status"
+    fi
+    warn "$1 crashed under emulation (exit status $status), attempt $attempt of 4"
+    rm -f -- "$root/var/lib/pacman/db.lck"
+  done
+  return "$status"
+}
+
+# A step inside the image that runs many programs, any of which may crash that
+# way, runs once more when it fails (retry_once guest ...). Each such step can
+# run again from the start; one that fails twice fails the build.
+retry_once() {
+  if "$@"; then
+    return 0
+  fi
+  warn "${*:1:3} failed; running it once more, in case a program in it crashed under emulation"
+  rm -f -- "$root/var/lib/pacman/db.lck"
+  "$@"
+}
+
+# pacman's download sandbox needs Landlock and a setuid to DownloadUser, neither
+# of which works under proot and qemu-user.
+guest_pacman() {
+  guest_retry pacman --disable-sandbox --noconfirm --noprogressbar "$@"
+}
+
+# The uid of a user in the image.
+guest_uid() {
+  awk -F: -v name="$1" '$1 == name { print $3; found = 1 } END { exit !found }' "$root/etc/passwd"
+}
+
+# ── Package names ────────────────────────────────────────────────────────────
+
+# Omarchy's package lists name x86_64 packages. This maps them for aarch64 the
+# way the Omarchy ISO's builder/aarch64-package-filter.sh does, with the Pi's
+# kernel as the image's kernel: kernel names become linux-rpi, nvim (which Arch
+# Linux ARM still ships as neovim) and vi get their aarch64 names, and the
+# ISO's closed list of x86-only or unpublished packages is left out.
+filter_package_names() {
+  local package
+
+  for package in "$@"; do
+    case $package in
+      linux | linux-omarchy | linux-t2)
+        [[ $package == "$kernel_package" ]] || echo "aarch64: replacing $package with $kernel_package" >&2
+        printf '%s\n' "$kernel_package"
+        ;;
+      linux-headers | linux-omarchy-headers | linux-t2-headers)
+        echo "aarch64: replacing $package with $kernel_package-headers" >&2
+        printf '%s\n' "$kernel_package-headers"
+        ;;
+      nvim)
+        echo "aarch64: replacing $package with neovim" >&2
+        printf '%s\n' neovim
+        ;;
+      vi)
+        echo "aarch64: replacing $package with ex-vi-compat" >&2
+        printf '%s\n' ex-vi-compat
+        ;;
+      obs-studio | yay-debug)
+        echo "aarch64: excluding $package, not yet published for aarch64" >&2
+        ;;
+      amd-ucode | intel-ucode | syslinux | broadcom-wl | broadcom-wl-dkms | memtest86+ | memtest86+-efi | edk2-shell | \
+        apple-bcm-firmware | apple-bcm-firmware-fetcher | apple-t2-audio-config | t2fanrd | tiny-dfr | macbook12-spi-driver-dkms | \
+        asusctl | dell-xps-touchpad-haptics | dell-xps13-sidecar-amps | linux-firmware-cirrus-dx13260 | intel-ipu7-camera | \
+        intel-lpmd | intel-media-driver | libva-intel-driver | vpl-gpu-rt | thermald | linux-ptl | linux-ptl-headers | \
+        tuxedo-drivers-nocompatcheck-dkms | yt6801-dkms | nvidia-580xx-dkms | nvidia-580xx-utils | nvidia-dkms | \
+        superwhisper-bin | lib32-* | vulkan-intel | vulkan-radeon | vulkan-asahi)
+        echo "aarch64: excluding x86-only package $package" >&2
+        ;;
+      *)
+        printf '%s\n' "$package"
+        ;;
+    esac
+  done
+}
+
+# The names in a package list file, without comments and blank lines.
+list_names() {
+  sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' -- "$1"
+}
+
+# ── 2. Source ────────────────────────────────────────────────────────────────
+
+# git on this host, without root's own or the system's configuration, so
+# nothing in them (an object format, a template, hooks) shapes the image's
+# checkout.
+host_git() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"
+}
+
+src_git() {
+  # The checkout may belong to another user; these reads are what root was
+  # asked to build from.
+  host_git -c safe.directory='*' -C "$source_dir" "$@"
+}
+
+resolve_source() {
+  local path
+
+  src_git rev-parse --git-dir >/dev/null 2>&1 || fail "--source $source_dir is not a git checkout"
+  commit=$(src_git rev-parse --verify --quiet "$ref^{commit}") || fail "--ref $ref names no commit in $source_dir"
+
+  if src_git show-ref --verify --quiet "refs/heads/$ref"; then
+    branch=$ref
+  elif branch=$(src_git symbolic-ref --quiet --short HEAD); then
+    :
+  else
+    fail "$source_dir has no branch checked out; check one out, or pass its name as --ref, so the Pi's checkout has a branch to update"
+  fi
+
+  origin_url=$(src_git remote get-url origin 2>/dev/null) ||
+    fail "$source_dir has no origin remote: the Pi updates its packages from the image checkout's origin"
+  if [[ $origin_url != https://* && $origin_url != http://* ]]; then
+    warn "origin is $origin_url; the Pi fetches updates from it as root, so a local path or an SSH URL won't work there"
+  fi
+
+  for path in "default/pacman/$platform/pacman-$channel.conf" "default/pacman/$platform/mirrorlist-$channel"; do
+    src_git cat-file -e "$commit:$path" 2>/dev/null ||
+      fail "$path is missing at $commit: the Pi's pacman templates (default/pacman/$platform/) must be in the checkout"
+  done
+  for path in "${local_packages[@]/#/pi/pkgbuilds/}"; do
+    src_git cat-file -e "$commit:$path/PKGBUILD" 2>/dev/null || fail "$path/PKGBUILD is missing at $commit"
+  done
+  for path in bin/omarchy-pkg-defaults "install/omarchy-$platform.packages"; do
+    src_git cat-file -e "$commit:$path" 2>/dev/null || fail "$path is missing at $commit"
+  done
+
+  if [[ $commit == "$(src_git rev-parse HEAD)" && -n $(src_git status --porcelain --untracked-files=no) ]]; then
+    warn "$source_dir has uncommitted changes; the image is built from commit $commit without them"
+  fi
+
+  version=$(src_git show "$commit:version" 2>/dev/null | head -1 | tr -cd '[:alnum:]._+-') || version=""
+  short_commit=$(src_git rev-parse --short "$commit")
+  image_name=pimarchy-${version:-dev}-$channel-$(date -u +%Y%m%d)-g$short_commit
+
+  echo "Source: $source_dir"
+  echo "Commit: $commit ($(src_git log -1 --format=%s "$commit"))"
+  echo "Branch: $branch, origin $origin_url"
+  echo "Channel: $channel"
+  echo "Image: $image_name"
+}
+
+# ── 3. Tarball ───────────────────────────────────────────────────────────────
+
+# Whether $1 matches the md5 sum file $2 (ALARM's "<sum>  <name>" format).
+md5_matches() {
+  local expected actual
+
+  read -r expected _ <"$2" || return 1
+  [[ $expected =~ ^[0-9a-f]{32}$ ]] || return 1
+  read -r actual _ < <(md5sum -- "$1") || return 1
+  [[ $actual == "$expected" ]]
+}
+
+fetch_tarball() {
+  local name=${alarm_url##*/}
+
+  if [[ -n $tarball_opt ]]; then
+    tarball=$tarball_opt
+    if [[ -f $tarball.md5 ]]; then
+      md5_matches "$tarball" "$tarball.md5" || fail "$tarball does not match $tarball.md5"
+      echo "Using $tarball (matches $tarball.md5)"
+    else
+      echo "Using $tarball as given: there is no $tarball.md5 beside it to check it against"
+    fi
+    return 0
+  fi
+
+  tarball=$cache/$name
+  curl -fsSL --retry 3 -o "$tarball.md5.new" "$alarm_url.md5" || fail "could not download $alarm_url.md5"
+  mv -f -- "$tarball.md5.new" "$tarball.md5"
+
+  if [[ -f $tarball ]] && md5_matches "$tarball" "$tarball.md5"; then
+    echo "Using the cached $tarball"
+    return 0
+  fi
+
+  echo "Downloading $alarm_url"
+  rm -f -- "$tarball.part"
+  curl -fL --retry 3 --retry-delay 5 -o "$tarball.part" "$alarm_url" || fail "could not download $alarm_url"
+  if ! md5_matches "$tarball.part" "$tarball.md5"; then
+    rm -f -- "$tarball.part"
+    fail "the download of $alarm_url does not match its md5 sum"
+  fi
+  mv -f -- "$tarball.part" "$tarball"
+}
+
+# ── 4. Root ──────────────────────────────────────────────────────────────────
+
+extract_root() {
+  rm -rf --one-file-system -- "$work"
+  # Searchable by all: the image's own accounts reach its files through this
+  # host path (see check_prerequisites).
+  install -d -m 0755 "$work" "$root"
+
+  # Numeric owners: the host's user and group names must not remap the image's.
+  echo "Extracting $tarball"
+  bsdtar -xpf "$tarball" --numeric-owner -C "$root"
+  [[ -x $root/usr/bin/pacman && -x $root/usr/bin/bash ]] || fail "$tarball is not an Arch Linux ARM root filesystem"
+  chown 0:0 "$root"
+  chmod 0755 "$root"
+  prepare_root
+}
+
+# Readies the extracted root for the build: everything after this runs in it.
+prepare_root() {
+  # The build binds this host's resolver config over /etc/resolv.conf, which in
+  # the tarball is a symlink into /run; sealing points it at the stub resolver.
+  rm -f -- "$root/etc/resolv.conf"
+  install -m 0644 /dev/null "$root/etc/resolv.conf"
+
+  # omarchy-settings' scriptlets lock under a root-owned /run/lock.
+  install -d -m 0755 -o 0 -g 0 "$root/run" "$root/run/lock"
+
+  # The image-target manifest: from here on omarchy-hw-platform inside the image
+  # reports the Pi, not this host, and hardware setup is deferred to its first
+  # boot.
+  install -d -m 0755 -o 0 -g 0 "$root/var/lib/omarchy" "$root/var/lib/omarchy/image"
+  printf 'format=1\nplatform=%s\n' "$platform" >"$root/var/lib/omarchy/image/target"
+  chown 0:0 "$root/var/lib/omarchy/image/target"
+  chmod 0644 "$root/var/lib/omarchy/image/target"
+
+  package_cache=$cache/pkg
+  install -d -m 0755 "$package_cache"
+  prepare_guest_env
+
+  echo "Arch Linux ARM in the image: $(guest uname -sm)"
+}
+
+# ── 5. Checkout ──────────────────────────────────────────────────────────────
+
+# The Pi builds its Omarchy packages from this checkout and fast-forwards it on
+# every update: a clone of the commit being built, with its full history (the
+# package versions count commits), on a branch named like the source's, which
+# tracks the source's origin.
+clone_source() {
+  local dest=$root$guest_src ref_name
+
+  install -d -m 0755 -o 0 -g 0 "$root/var/lib/pimarchy"
+  rm -rf -- "$dest"
+  host_git init -q -b "$branch" "$dest"
+  # git hands a local fetch's upload-pack none of this command's -c settings, so
+  # it gets its own: the source may belong to another user.
+  host_git -C "$dest" fetch --quiet --no-tags \
+    --upload-pack="git -c 'safe.directory=*' -c uploadpack.allowAnySHA1InWant=true upload-pack" \
+    "$source_dir" "$commit"
+  host_git -C "$dest" checkout -q -B "$branch" "$commit"
+  host_git -C "$dest" remote add origin "$origin_url"
+  host_git -C "$dest" config "branch.$branch.remote" origin
+  host_git -C "$dest" config "branch.$branch.merge" "refs/heads/$branch"
+  for ref_name in $(host_git -C "$dest" for-each-ref --format='%(refname)' refs/heads); do
+    if [[ $ref_name != "refs/heads/$branch" ]]; then
+      host_git -C "$dest" update-ref -d "$ref_name"
+    fi
+  done
+  set_checkout_origin "$origin_url"
+  chown -R 0:0 "$dest"
+
+  commit_count=$(host_git -C "$dest" rev-list --count HEAD)
+  [[ $(host_git -C "$dest" rev-parse HEAD) == "$commit" ]] || fail "the image checkout is not at $commit"
+  [[ $(host_git -C "$dest" rev-parse '@{upstream}') == "$commit" ]] || fail "the image checkout's branch tracks no upstream"
+  echo "Cloned $commit ($commit_count commits) into $guest_src on branch $branch"
+}
+
+# ── 6. pacman ────────────────────────────────────────────────────────────────
+
+mask_mkinitcpio_hook() {
+  local hooks=$root/etc/pacman.d/hooks
+
+  install -d -m 0755 "$hooks"
+  if [[ -L $hooks/$mkinitcpio_hook && $(readlink -- "$hooks/$mkinitcpio_hook") == "/dev/null" ]]; then
+    return 0
+  fi
+  if [[ -e $hooks/$mkinitcpio_hook || -L $hooks/$mkinitcpio_hook ]]; then
+    mv -f -- "$hooks/$mkinitcpio_hook" "$hooks/$mkinitcpio_hook.omarchy-backup"
+  fi
+  ln -s /dev/null "$hooks/$mkinitcpio_hook"
+}
+
+unmask_mkinitcpio_hook() {
+  local hooks=$root/etc/pacman.d/hooks
+
+  if [[ -L $hooks/$mkinitcpio_hook && $(readlink -- "$hooks/$mkinitcpio_hook") == "/dev/null" ]]; then
+    rm -f -- "$hooks/$mkinitcpio_hook"
+  fi
+  if [[ -e $hooks/$mkinitcpio_hook.omarchy-backup || -L $hooks/$mkinitcpio_hook.omarchy-backup ]]; then
+    mv -f -- "$hooks/$mkinitcpio_hook.omarchy-backup" "$hooks/$mkinitcpio_hook"
+  fi
+}
+
+setup_pacman() {
+  local templates=$root$guest_src/default/pacman/$platform repo=$root$guest_repo kind
+
+  grep -q '^\[pimarchy\]' "$templates/pacman-$channel.conf" ||
+    fail "$templates/pacman-$channel.conf has no [pimarchy] repository"
+  install -m 0644 -o 0 -g 0 "$templates/pacman-$channel.conf" "$root/etc/pacman.conf"
+  install -m 0644 -o 0 -g 0 "$templates/mirrorlist-$channel" "$root/etc/pacman.d/mirrorlist"
+  echo "pacman.conf and mirrorlist: default/pacman/$platform, $channel channel"
+
+  # pacman refuses to sync a file:// repository without a database, so the
+  # local repository starts out empty until its packages are built.
+  install -d -m 0755 -o 0 -g 0 "$repo"
+  for kind in db files; do
+    if [[ ! -e $repo/pimarchy.$kind ]]; then
+      bsdtar -czf "$repo/pimarchy.$kind.tar.gz" -T /dev/null
+      ln -sfn "pimarchy.$kind.tar.gz" "$repo/pimarchy.$kind"
+    fi
+  done
+
+  # Whatever runs pacman inside the image during the build (makepkg, Omarchy's
+  # setup) gets the sandbox switched off too. Removed when the root is sealed.
+  install -d -m 0755 "$root/usr/local/sbin"
+  printf '%s\n' '#!/bin/sh' \
+    '# pi/build-image: pacman cannot sandbox its downloads under proot; removed before the image is sealed.' \
+    'exec /usr/bin/pacman --disable-sandbox "$@"' >"$root/usr/local/sbin/pacman"
+  chmod 0755 "$root/usr/local/sbin/pacman"
+
+  # Every kernel, firmware and module package would rebuild the initramfs, with
+  # this host's /sys for autodetect; it is built once the root is complete.
+  mask_mkinitcpio_hook
+}
+
+# ── 7. Keyring ───────────────────────────────────────────────────────────────
+
+# Whether the build keyring trusts every key in $@ (fingerprints).
+keys_trusted() {
+  guest_retry bash -c '
+    for key; do
+      gpg --homedir /etc/pacman.d/gnupg --no-permission-warning --batch --with-colons --list-keys "$key" 2>/dev/null |
+        grep -q "^pub:[fu]:" || exit 1
+    done' pimarchy-keys "$@"
+}
+
+# pacman-key --populate signs each key with a gpg of its own and carries on when
+# one crashes under emulation, which leaves that key untrusted: pacman then
+# refuses its packages. Populates the keyrings named after the key, until the
+# key is trusted.
+populate_keyring() {
+  local key=$1 attempt
+  shift
+
+  for attempt in 1 2 3; do
+    guest_retry pacman-key --populate "$@" || true
+    if keys_trusted "$key"; then
+      return 0
+    fi
+    warn "the build keyring does not trust $key yet; populating it again"
+  done
+  fail "the build keyring does not trust $key"
+}
+
+# The tarball has no pacman keyring. This one only serves the build: sealing
+# removes it, and each Pi makes its own on its first boot.
+setup_keyring() {
+  local url package keyrings=$work/keyring file copied=() attempt
+
+  for attempt in 1 2 3; do
+    rm -rf -- "$root/etc/pacman.d/gnupg"
+    if guest_retry pacman-key --init &&
+      guest bash -c 'gpg --homedir /etc/pacman.d/gnupg --no-permission-warning --batch --with-colons --list-secret-keys | grep -q "^sec:"'; then
+      break
+    fi
+    (( attempt < 3 )) || fail "pacman-key could not make the build keyring"
+    warn "pacman-key did not make the build keyring; making it again"
+  done
+  # Arch Linux ARM signs every package in its repositories with its build key.
+  populate_keyring "$alarm_key"
+  guest_pacman -Sy
+
+  # Omarchy's key comes in omarchy-keyring, which is signed with it: trust the
+  # key from the package's own keyring files first, then install the package
+  # with its signature checked.
+  url=$(guest_retry pacman --disable-sandbox -Sp omarchy-keyring | grep '://' | tail -1) ||
+    fail "pacman cannot find omarchy-keyring in [omarchy]"
+  package=$package_cache/${url##*/}
+  if [[ $url != file://* ]]; then
+    curl -fL --retry 3 -o "$package.part" "$url" || fail "could not download $url"
+    mv -f -- "$package.part" "$package"
+  fi
+  [[ -f $package ]] || fail "omarchy-keyring is not at $package"
+
+  rm -rf -- "$keyrings"
+  install -d -m 0700 "$keyrings"
+  bsdtar -xf "$package" -C "$keyrings" usr/share/pacman/keyrings
+  for file in "$keyrings"/usr/share/pacman/keyrings/omarchy*; do
+    [[ -f $file ]] || continue
+    install -m 0644 -o 0 -g 0 -- "$file" "$root/usr/share/pacman/keyrings/${file##*/}"
+    copied+=("$root/usr/share/pacman/keyrings/${file##*/}")
+  done
+  (( ${#copied[@]} )) || fail "$package carries no keyring"
+  populate_keyring "$omarchy_key" omarchy
+  rm -f -- "${copied[@]}"
+  rm -rf -- "$keyrings"
+
+  guest_pacman -S omarchy-keyring
+  keys_trusted "$omarchy_key" "$alarm_key" || fail "the build keyring does not trust Omarchy's and Arch Linux ARM's keys"
+}
+
+# ── 8. Kernel ────────────────────────────────────────────────────────────────
+
+# The tarball boots linux-aarch64 through U-Boot; the Pi firmware boots
+# linux-rpi directly, and the two kernels conflict. The whole root is upgraded
+# in the same transaction, so nothing installed later meets older libraries.
+swap_kernel() {
+  local -a stock=() family=()
+
+  mapfile -t stock < <(guest_retry pacman -Qq linux-aarch64 linux-aarch64-headers uboot-raspberrypi 2>/dev/null || true)
+  if (( ${#stock[@]} )); then
+    echo "Removing ${stock[*]}"
+    guest_pacman -Rdd "${stock[@]}"
+  fi
+
+  mapfile -t family < <(list_names "$root$guest_src/install/omarchy-$platform.packages")
+  mapfile -t family < <(filter_package_names "${family[@]}")
+  [[ " ${family[*]} " == *" $kernel_package "* ]] ||
+    fail "install/omarchy-$platform.packages does not name $kernel_package"
+  echo "Upgrading the root and installing ${family[*]}"
+  guest_pacman -Syu --needed "${family[@]}"
+
+  rm -f -- "$root"/boot/*.pacsave
+  [[ -s $root/boot/kernel8.img && -f $root/boot/config.txt && -f $root/boot/cmdline.txt ]] ||
+    fail "$kernel_package left no kernel8.img, config.txt and cmdline.txt in /boot"
+}
+
+# ── 9. Local packages ────────────────────────────────────────────────────────
+
+# Runs a command inside the image as the build user.
+guest_as_builder() {
+  guest setpriv --reuid="$build_user" --regid="$build_user" --init-groups \
+    env HOME="$guest_build/home" OMARCHY_SRC="$guest_src" "$@"
+}
+
+# The PKGBUILDs' makedepends, as makepkg reads them for the build user.
+package_makedepends() {
+  local package srcinfo
+
+  for package in "${local_packages[@]}"; do
+    srcinfo=$(guest_as_builder bash -c 'cd "$1" && makepkg --printsrcinfo' pimarchy-srcinfo "$guest_build/pkgbuilds/$package") ||
+      srcinfo=$(guest_as_builder bash -c 'cd "$1" && makepkg --printsrcinfo' pimarchy-srcinfo "$guest_build/pkgbuilds/$package") ||
+      fail "makepkg cannot read pi/pkgbuilds/$package/PKGBUILD"
+    awk '$1 ~ /^makedepends(_aarch64)?$/ && $2 == "=" { print $3 }' <<<"$srcinfo"
+  done
+}
+
+# Builds the three packages straight from the PKGBUILDs, versioned as
+# omarchy-update-rpi-pkgs versions them, when the checkout has no such command.
+build_packages_inline() {
+  local package base suffix out=$guest_build/out
+
+  suffix=.r$commit_count.g$(host_git -C "$root$guest_src" rev-parse --short HEAD)
+  install -d -m 0755 -o "$build_uid" -g "$build_gid" "$root$out"
+  for package in "${local_packages[@]}"; do
+    base=$(sed -n 's/^pkgver=//p' "$root$guest_build/pkgbuilds/$package/PKGBUILD" | head -1 | tr -d "\"'")
+    [[ -n $base ]] || fail "pi/pkgbuilds/$package/PKGBUILD sets no pkgver"
+    sed -i "s/^pkgver=.*/pkgver=$base$suffix/" "$root$guest_build/pkgbuilds/$package/PKGBUILD"
+    echo "Building $package $base$suffix"
+    retry_once guest_as_builder PKGDEST="$out" PKGEXT=.pkg.tar.zst \
+      bash -c 'cd "$1" && makepkg --noconfirm --nodeps --nocheck --skippgpcheck --skipchecksums --cleanbuild -f' \
+      pimarchy-makepkg "$guest_build/pkgbuilds/$package"
+  done
+
+  retry_once guest bash -euo pipefail -c '
+    shopt -s nullglob
+    packages=("$1"/*.pkg.tar.*)
+    (( ${#packages[@]} )) || { echo "makepkg built nothing" >&2; exit 1; }
+    install -m 0644 -o root -g root "${packages[@]}" "$2/"
+    cd "$2"
+    repo-add pimarchy.db.tar.gz "${packages[@]##*/}"
+  ' pimarchy-publish "$out" "$guest_repo"
+}
+
+# The packages in the local repository's database, as name-pkgver-pkgrel.
+repo_packages() {
+  bsdtar -tf "$root$guest_repo/pimarchy.db" | sed -n 's|^\(\./\)\{0,1\}\([^/]*\)/desc$|\2|p' | sort -u
+}
+
+# The name-pkgver-pkgrel of package $1 in the local repository. Neither pkgver
+# nor pkgrel holds a hyphen, so the name is everything before the last two.
+repo_package() {
+  repo_packages | grep -E "^$1-[^-]+-[^-]+$" | tail -1
+}
+
+# Points the checkout's origin at $1. Its remote-tracking refs go, as they
+# would describe whatever origin was before, except the branch's own, which
+# names the commit being built: the branch's upstream has to resolve before
+# omarchy-update-rpi-pkgs fetches it, and the Pi's first fetch moves it to
+# wherever origin really is.
+set_checkout_origin() {
+  local entry
+
+  host_git -C "$root$guest_src" remote set-url origin "$1"
+  for entry in $(host_git -C "$root$guest_src" for-each-ref --format='%(refname)' refs/remotes); do
+    host_git -C "$root$guest_src" update-ref -d "$entry"
+  done
+  host_git -C "$root$guest_src" update-ref "refs/remotes/origin/$branch" "$commit"
+  rm -f -- "$root$guest_src/.git/FETCH_HEAD"
+}
+
+build_local_packages() {
+  local package makedepends=() command=$guest_src/bin/omarchy-update-rpi-pkgs entry missing leftovers
+  local -a command_env=(env OMARCHY_PATH="$guest_src" PATH="$guest_src/bin:/usr/local/sbin:/usr/local/bin:/usr/bin")
+
+  guest_pacman -S --needed base-devel git
+
+  # makepkg refuses to run as root.
+  if guest_uid "$build_user" >/dev/null; then
+    fail "the image already has a $build_user user"
+  fi
+  install -d -m 0755 -o 0 -g 0 "$root$guest_build"
+  guest useradd --system --create-home --home-dir "$guest_build/home" --user-group --shell /usr/bin/bash "$build_user"
+  build_uid=$(guest_uid "$build_user")
+  build_gid=$(awk -F: -v name="$build_user" '$1 == name { print $4 }' "$root/etc/passwd")
+  install -d -m 0755 -o "$build_uid" -g "$build_gid" "$root$guest_build/pkgbuilds"
+  for package in "${local_packages[@]}"; do
+    cp -a -- "$root$guest_src/pi/pkgbuilds/$package" "$root$guest_build/pkgbuilds/$package"
+  done
+  chown -R "$build_uid:$build_gid" "$root$guest_build/pkgbuilds"
+
+  mapfile -t makedepends < <(package_makedepends | sort -u)
+  if (( ${#makedepends[@]} )); then
+    echo "Installing what the packages build with: ${makedepends[*]}"
+    guest_pacman -S --needed "${makedepends[@]}"
+  fi
+
+  if [[ -x $root$command ]]; then
+    # The command fast-forwards the checkout from origin before it builds. For
+    # the image the checkout must stay at the commit being built, so origin
+    # points at the checkout itself while it runs and nothing new is fetched.
+    set_checkout_origin "$guest_src"
+    echo "Building with $command --init --as-user $build_user"
+    retry_once guest "${command_env[@]}" "$command" --init --as-user "$build_user"
+    missing=0
+    for package in "${local_packages[@]}"; do
+      [[ -n $(repo_package "$package") ]] || missing=1
+    done
+    if (( missing )); then
+      echo "Building with $command --as-user $build_user"
+      retry_once guest "${command_env[@]}" "$command" --as-user "$build_user"
+    fi
+    set_checkout_origin "$origin_url"
+    [[ $(host_git -C "$root$guest_src" rev-parse HEAD) == "$commit" ]] ||
+      fail "$command moved the image checkout away from $commit"
+  else
+    echo "$command is not in this checkout; building the packages directly"
+    build_packages_inline
+  fi
+
+  guest userdel --remove "$build_user"
+  rm -rf --one-file-system -- "$root$guest_build"
+  leftovers=$(find "$root" -xdev \( -uid "$build_uid" -o -gid "$build_gid" \) -print | head -20)
+  [[ -z $leftovers ]] || fail "the build left files owned by $build_user (uid $build_uid) in the image: $leftovers"
+
+  for package in "${local_packages[@]}"; do
+    entry=$(repo_package "$package") || fail "the local repository has no $package"
+    if [[ ! $entry =~ \.r$commit_count\.g([0-9a-f]+)-[0-9]+$ || $commit != "${BASH_REMATCH[1]}"* ]]; then
+      fail "the local repository's $entry is not versioned for $commit (.r$commit_count.g${commit:0:7})"
+    fi
+    echo "[pimarchy] $entry"
+  done
+  guest_pacman -Sy
+}
+
+# ── 10. Omarchy ──────────────────────────────────────────────────────────────
+
+install_omarchy() {
+  local -a defaults=() unmet=()
+
+  # In the ISO's order: the keyrings and omarchy-settings (which seeds /etc/skel
+  # and the system configs the rest relies on), LuaRocks, the Neovim config,
+  # then the runtime, the Pi's boot package and the platform's default set.
+  guest_pacman -S --needed base-devel git omarchy-keyring archlinuxarm-keyring omarchy-settings
+  guest_pacman -S --needed lua51 luarocks
+  guest_pacman -S --needed omarchy-nvim
+
+  mapfile -t defaults < <(OMARCHY_PATH=$root$guest_src "$root$guest_src/bin/omarchy-pkg-defaults" "$platform")
+  (( ${#defaults[@]} )) || fail "omarchy-pkg-defaults $platform printed no packages"
+  mapfile -t defaults < <(filter_package_names "${defaults[@]}")
+  echo "Installing omarchy, omarchy-rpi-boot and ${#defaults[@]} default packages"
+  guest_pacman -S --needed omarchy omarchy-rpi-boot "${defaults[@]}"
+
+  mapfile -t unmet < <(guest_retry pacman -T "${defaults[@]}" omarchy omarchy-settings omarchy-rpi-boot || true)
+  (( ! ${#unmet[@]} )) || fail "not installed: ${unmet[*]}"
+}
+
+# ── 11. Arch Linux ARM's defaults ────────────────────────────────────────────
+
+# As omarchy-system-factory-reset scrubs a factory root: no accounts but
+# root's, whose password is locked, and no backups holding the old ones. Arch
+# Linux ARM's DHCP-on-every-interface networkd setup and its sshd go too:
+# Omarchy runs NetworkManager and leaves sshd off.
+scrub_alarm() {
+  local user unit
+
+  for user in $(awk -F: '$3 >= 1000 && $3 < 60000 { print $1 }' "$root/etc/passwd"); do
+    echo "Removing the $user account"
+    guest userdel --remove "$user"
+    rm -rf --one-file-system -- "${root:?}/home/$user"
+  done
+  guest usermod --password '!' root
+  rm -f -- "$root"/etc/{shadow-,gshadow-,passwd-,group-,subuid-,subgid-}
+
+  rm -f -- "$root/etc/systemd/network/en.network" "$root/etc/systemd/network/eth.network"
+  for unit in sshd.service systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service; do
+    if [[ -e $root/usr/lib/systemd/system/$unit ]]; then
+      guest systemctl disable "$unit"
+    fi
+  done
+
+  printf 'omarchy\n' >"$root/etc/hostname"
+}
+
+# ── 12. Omarchy system setup ─────────────────────────────────────────────────
+
+apply_system() {
+  retry_once guest env OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
+    OMARCHY_MIRROR="$channel" OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log \
+    OMARCHY_LOG_TO_STDOUT=1 MISE_OFFLINE=1 \
+    /usr/bin/omarchy-apply-system --defer-provisioning --first-install
+}
+
+# ── 13. Boot files ───────────────────────────────────────────────────────────
+
+# The disk identifier the image's partitions are named by (PARTUUID
+# <id>-01 and <id>-02), and its root filesystem's UUID, chosen once per build.
+choose_identifiers() {
+  disk_id=""
+  while [[ ! $disk_id =~ ^[0-9a-f]{8}$ || $disk_id == "00000000" ]]; do
+    disk_id=$(od -An -N4 -tx4 /dev/urandom | tr -d '[:space:]')
+  done
+  root_fs_uuid=$(cat /proc/sys/kernel/random/uuid)
+}
+
+setup_boot() {
+  local setup=/usr/lib/omarchy/rpi-boot/setup-boot shim=$root/usr/local/sbin/findmnt initcpio_log
+
+  unmask_mkinitcpio_hook
+  [[ -x $root$setup ]] || fail "$setup is missing: omarchy-rpi-boot is not installed"
+
+  # setup-boot points cmdline.txt at the partition mounted at /, which inside
+  # proot is this host's. For the build, findmnt answers with the image's own
+  # root partition; the Pi's first boot runs setup-boot again for real.
+  printf '%s\n' '#!/bin/bash' \
+    '# pi/build-image: the image root partition, for setup-boot during the build only.' \
+    'for arg; do' \
+    '  if [[ $arg == *PARTUUID* ]]; then' \
+    "    echo $disk_id-02" \
+    '    exit 0' \
+    '  fi' \
+    'done' \
+    'exec /usr/bin/findmnt "$@"' >"$shim"
+  chmod 0755 "$shim"
+  retry_once guest "$setup" image-first-boot
+  rm -f -- "$shim"
+  grep -q "root=PARTUUID=$disk_id-02\( \|$\)" "$root/boot/cmdline.txt" ||
+    fail "setup-boot did not point /boot/cmdline.txt at PARTUUID=$disk_id-02: $(<"$root/boot/cmdline.txt")"
+  echo "cmdline.txt: $(<"$root/boot/cmdline.txt")"
+
+  cat >"$root/etc/fstab" <<FSTAB
+# Static information about the filesystems.
+# See fstab(5) for details.
+
+# <file system>       <dir>  <type>  <options>                                            <dump> <pass>
+PARTUUID=$disk_id-02  /      ext4    rw,relatime                                          0      1
+PARTUUID=$disk_id-01  /boot  vfat    rw,relatime,fmask=0022,dmask=0022,errors=remount-ro  0      2
+FSTAB
+
+  # A generic initramfs, since autodetect would read this host's /sys. The
+  # first boot rebuilds it on the Pi, with autodetect. mkinitcpio passes
+  # options to its preset runs only after --.
+  if ! initcpio_log=$(guest mkinitcpio -P -- -S autodetect 2>&1); then
+    printf '%s\n' "$initcpio_log"
+    warn "mkinitcpio failed; running it once more, in case a program in it crashed under emulation"
+    if ! initcpio_log=$(guest mkinitcpio -P -- -S autodetect 2>&1); then
+      printf '%s\n' "$initcpio_log"
+      fail "mkinitcpio could not build the initramfs"
+    fi
+  fi
+  printf '%s\n' "$initcpio_log"
+  if grep -q 'Running build hook: \[autodetect\]' <<<"$initcpio_log"; then
+    fail "mkinitcpio ran its autodetect hook, which reads this build host's hardware"
+  fi
+  install -m 0644 -o 0 -g 0 /dev/null "$root/var/lib/omarchy/image/boot-rebuild"
+
+  install -d -m 0755 -o 0 -g 0 "$root/var/lib/pimarchy"
+  install -m 0644 -o 0 -g 0 /dev/null "$root/var/lib/pimarchy/grow-root-pending"
+  guest systemctl enable omarchy-rpi-grow-root.service
+}
+
+# ── 14. First-boot setup ─────────────────────────────────────────────────────
+
+# As a deferred-provisioning ISO install arms it (the orchestrator's
+# stage_provisioning_state and configure_login): the owner unit enabled with
+# its pending marker, SDDM set up with no user, no autologin and no state.
+arm_first_boot() {
+  local provisioning=$root/var/lib/omarchy/provisioning
+  local unit=omarchy-provision-owner.service
+  local unit_src=$root/usr/share/omarchy/install/provisioning/$unit
+
+  [[ -f $unit_src && -x $root/usr/bin/omarchy-provision-owner ]] ||
+    fail "the installed Omarchy ships no first-boot setup ($unit, omarchy-provision-owner)"
+  install -d -m 0755 -o 0 -g 0 "$provisioning"
+  install -m 0644 -o 0 -g 0 /dev/null "$provisioning/pending"
+  install -D -m 0644 -o 0 -g 0 "$unit_src" "$root/etc/systemd/system/$unit"
+  install -d -m 0755 "$root/etc/systemd/system/multi-user.target.wants"
+  ln -sfn "/etc/systemd/system/$unit" "$root/etc/systemd/system/multi-user.target.wants/$unit"
+
+  install -d -m 0755 "$root/etc/sddm.conf.d"
+  printf '[Theme]\nCurrent=omarchy\n\n[Users]\nRememberLastUser=true\nRememberLastSession=true\n' \
+    >"$root/etc/sddm.conf.d/99-omarchy-login.conf"
+  chmod 0644 "$root/etc/sddm.conf.d/99-omarchy-login.conf"
+  rm -f -- "$root/etc/sddm.conf.d/autologin.conf" "$root/var/lib/sddm/state.conf" \
+    "$root/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+  guest systemctl enable sddm.service
+}
+
+# ── 15. Seal ─────────────────────────────────────────────────────────────────
+
+# What no two machines may share, what only the build needed, and what it left
+# behind, following the Omarchy ISO's VM sealing (test/vm-image).
+seal_root() {
+  local dir file
+
+  ln -sfn ../run/systemd/resolve/stub-resolv.conf "$root/etc/resolv.conf"
+
+  # Empty, not "uninitialized": the first boot makes the machine's id without
+  # treating itself as a first boot that resets every unit to its preset.
+  : >"$root/etc/machine-id"
+  if [[ -f $root/var/lib/dbus/machine-id && ! -L $root/var/lib/dbus/machine-id ]]; then
+    rm -f -- "$root/var/lib/dbus/machine-id"
+  fi
+  rm -f -- "$root"/etc/ssh/ssh_host_*
+  rm -f -- "$root/var/lib/systemd/random-seed" "$root/var/lib/systemd/credential.secret"
+  rm -rf -- "$root/etc/pacman.d/gnupg"
+  rm -f -- "$root/usr/local/sbin/pacman" "$root/usr/local/sbin/findmnt" "$root/var/lib/pacman/db.lck"
+  rm -f -- "$root"/etc/NetworkManager/system-connections/*
+  rm -rf -- "$root"/var/lib/NetworkManager/*
+
+  rm -rf -- "$root"/var/log/journal/*
+  for file in wtmp btmp lastlog; do
+    if [[ -f $root/var/log/$file ]]; then
+      : >"$root/var/log/$file"
+    fi
+  done
+  rm -rf -- "$root"/root/.bash_history "$root"/root/.lesshst "$root"/root/.viminfo "$root"/root/.python_history \
+    "$root"/root/.wget-hsts "$root"/root/.cache "$root"/root/.gnupg
+
+  for dir in tmp var/tmp run var/cache/pacman/pkg; do
+    if [[ -d $root/$dir ]]; then
+      find "$root/$dir" -mindepth 1 -delete
+    fi
+  done
+
+  # The Pi has no clock that survives power-off: systemd starts the clock no
+  # earlier than this file's time, so the first boot's keyring and logs don't
+  # date from before the image was built.
+  touch "$root/usr/lib/clock-epoch"
+}
+
+# ── 16. Validate ─────────────────────────────────────────────────────────────
+
+# Whether path $1 in the image is owned by root (whoever runs the build, which
+# is root), a real file or directory, and writable by root alone, from the path
+# up to /: what the image-target, dispatch and update trust checks require.
+image_path_trusted() {
+  local path=$1 owner mode
+
+  while [[ -n $path && $path != "/" ]]; do
+    if [[ -L $root$path || ! -e $root$path ]]; then
+      return 1
+    fi
+    read -r owner mode < <(stat -c '%u %a' -- "$root$path")
+    (( owner == EUID && (8#$mode & 8#022) == 0 )) || return 1
+    path=$(dirname -- "$path")
+  done
+}
+
+# Prints, one per line, everything that keeps the image root from being the
+# image the Pi expects to boot. A check whose command fails reports its problem
+# rather than stopping the others, so this runs without errexit, in a subshell;
+# it exits 0 only when it got through every check.
+root_problems() (
+  local path file line name repo_version installed_version template id
+  local -A known=()
+
+  set +e
+  problem() {
+    printf '%s\n' "$*"
+  }
+  trusted_path() {
+    image_path_trusted "$1" || problem "$1 is missing or not root-owned and writable by root alone"
+  }
+
+  # The image-target contract.
+  file=$root/var/lib/omarchy/image/target
+  if [[ $(<"$file") != $'format=1\nplatform='"$platform" ]] 2>/dev/null; then
+    problem "/var/lib/omarchy/image/target does not name format=1 and platform=$platform"
+  fi
+  for path in /var/lib/omarchy/image/target /var/lib/omarchy/image/deferred-steps /var/lib/omarchy/image/pacman-keyring \
+    /var/lib/omarchy/image/boot-rebuild /var/lib/omarchy/provisioning/pending; do
+    trusted_path "$path"
+  done
+  [[ $(stat -c '%a' -- "$root/var/lib/omarchy/image") == "755" ]] 2>/dev/null ||
+    problem "/var/lib/omarchy/image is not mode 0755"
+  [[ $(stat -c '%a' -- "$file") == "644" ]] 2>/dev/null || problem "/var/lib/omarchy/image/target is not mode 0644"
+  if [[ -s $root/var/lib/omarchy/image/deferred-steps ]]; then
+    while IFS= read -r line; do
+      [[ $line == install/hardware/*.sh && -f $root/usr/share/omarchy/$line ]] ||
+        problem "deferred step $line is not a shipped hardware step"
+    done <"$root/var/lib/omarchy/image/deferred-steps"
+  else
+    problem "no hardware steps are queued for the first boot (/var/lib/omarchy/image/deferred-steps)"
+  fi
+  [[ -L $root/etc/systemd/system/multi-user.target.wants/omarchy-provision-hardware.service ]] ||
+    problem "omarchy-provision-hardware.service is not enabled"
+  [[ ! -e $root/etc/pacman.d/gnupg ]] || problem "the build's pacman keyring is still in the image"
+
+  # Owner setup.
+  [[ -f $root/etc/systemd/system/omarchy-provision-owner.service ]] || problem "omarchy-provision-owner.service is not installed"
+  [[ $(readlink -- "$root/etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service") == \
+    "/etc/systemd/system/omarchy-provision-owner.service" ]] || problem "omarchy-provision-owner.service is not enabled"
+  [[ -L $root/etc/systemd/system/display-manager.service ]] || problem "no display manager is enabled"
+  [[ -f $root/etc/sddm.conf.d/99-omarchy-login.conf ]] || problem "SDDM's login config is missing"
+  [[ ! -e $root/etc/sddm.conf.d/autologin.conf && ! -e $root/var/lib/sddm/state.conf ]] ||
+    problem "SDDM has an autologin or a last user before the owner exists"
+
+  # Accounts.
+  if grep -q '^alarm:' "$root/etc/passwd" "$root/etc/shadow" "$root/etc/group"; then
+    problem "Arch Linux ARM's alarm account is still in the image"
+  fi
+  if awk -F: '$3 >= 1000 && $3 < 60000 { found = 1 } END { exit !found }' "$root/etc/passwd"; then
+    problem "the image has user accounts: $(awk -F: '$3 >= 1000 && $3 < 60000 { print $1 }' "$root/etc/passwd" | tr '\n' ' ')"
+  fi
+  [[ $(awk -F: '$1 == "root" { print $2 }' "$root/etc/shadow") == "!" ]] || problem "root's password is not locked"
+  [[ -z $(find "$root/home" -mindepth 1 -maxdepth 1 -print -quit) ]] || problem "/home is not empty"
+  ! grep -q "^$build_user:" "$root/etc/passwd" || problem "the $build_user account is still in the image"
+
+  # The boot partition's contents and the root it names.
+  for file in kernel8.img initramfs-linux.img bcm2711-rpi-400.dtb start4.elf fixup4.dat config.txt cmdline.txt; do
+    [[ -s $root/boot/$file ]] || problem "/boot/$file is missing"
+  done
+  grep -q "root=PARTUUID=$disk_id-02\( \|$\)" "$root/boot/cmdline.txt" 2>/dev/null ||
+    problem "/boot/cmdline.txt does not name root=PARTUUID=$disk_id-02"
+  grep -qE '^[[:space:]]*initramfs[[:space:]]+initramfs-linux\.img' "$root/boot/config.txt" 2>/dev/null ||
+    problem "/boot/config.txt does not load initramfs-linux.img"
+  grep -q "^PARTUUID=$disk_id-02 \+/ \+ext4" "$root/etc/fstab" && grep -q "^PARTUUID=$disk_id-01 \+/boot \+vfat" "$root/etc/fstab" ||
+    problem "/etc/fstab does not mount the image's partitions"
+  [[ ! -L $root/etc/pacman.d/hooks/$mkinitcpio_hook && ! -e $root/etc/pacman.d/hooks/$mkinitcpio_hook.omarchy-backup ]] ||
+    problem "mkinitcpio's pacman hook is still masked"
+  [[ -f $root/var/lib/pimarchy/grow-root-pending ]] || problem "the root partition is not set to grow on the first boot"
+  [[ -L $root/etc/systemd/system/local-fs.target.wants/omarchy-rpi-grow-root.service ]] ||
+    problem "omarchy-rpi-grow-root.service is not enabled"
+  for path in /usr/lib/omarchy/rpi-boot/setup-boot /usr/lib/omarchy/rpi-boot/update-verify /usr/lib/omarchy/rpi-boot/grow-root \
+    /etc/limine-entry-tool.d/omarchy-defaults.conf; do
+    trusted_path "$path"
+  done
+
+  # pacman: the Pi's templates, the local repository and what came from it.
+  template=$root$guest_src/default/pacman/$platform
+  cmp -s "$template/pacman-$channel.conf" "$root/etc/pacman.conf" ||
+    problem "/etc/pacman.conf is not default/pacman/$platform/pacman-$channel.conf"
+  cmp -s "$template/mirrorlist-$channel" "$root/etc/pacman.d/mirrorlist" ||
+    problem "/etc/pacman.d/mirrorlist is not default/pacman/$platform/mirrorlist-$channel"
+  for name in pimarchy omarchy core extra alarm; do
+    [[ -s $root/var/lib/pacman/sync/$name.db ]] || problem "the image carries no $name sync database"
+  done
+  for name in "${local_packages[@]}"; do
+    repo_version=$(repo_packages | sed -n "s/^$name-\([^-]*-[^-]*\)$/\1/p" | tail -1)
+    installed_version=$(find "$root/var/lib/pacman/local" -mindepth 1 -maxdepth 1 -name "$name-*" -printf '%f\n' |
+      sed -n "s/^$name-\([^-]*-[^-]*\)$/\1/p" | tail -1)
+    if [[ -z $repo_version || $repo_version != "$installed_version" ]]; then
+      problem "$name ${installed_version:-is not installed} is not the [pimarchy] build ${repo_version:-(none)}"
+    fi
+  done
+  # pimarchy.db is repo-add's link to the database file beside it.
+  file=$(readlink -f -- "$root$guest_repo/pimarchy.db")
+  if [[ $file == "$root$guest_repo"/* && -f $file ]]; then
+    trusted_path "${file#"$root"}"
+  else
+    problem "$guest_repo/pimarchy.db does not lead to a database in $guest_repo"
+  fi
+  for path in "$guest_src/.git/HEAD" "$guest_src/bin"; do
+    trusted_path "$path"
+  done
+  [[ -z $(find "$root/var/lib/pimarchy" ! -uid "$EUID" -print -quit) ]] || problem "/var/lib/pimarchy holds files root does not own"
+  [[ $(host_git -C "$root$guest_src" rev-parse HEAD 2>/dev/null) == "$commit" ]] || problem "$guest_src is not at $commit"
+  [[ $(host_git -C "$root$guest_src" remote get-url origin 2>/dev/null) == "$origin_url" ]] || problem "$guest_src's origin is not $origin_url"
+  [[ $(host_git -C "$root$guest_src" symbolic-ref --short HEAD 2>/dev/null) == "$branch" ]] || problem "$guest_src is not on branch $branch"
+  [[ $(host_git -C "$root$guest_src" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) == "origin/$branch" ]] ||
+    problem "$guest_src's branch does not track origin/$branch, so the Pi would never fetch it"
+
+  # Sealing.
+  [[ -f $root/etc/machine-id && ! -s $root/etc/machine-id ]] || problem "/etc/machine-id is not empty"
+  [[ -z $(find "$root/etc/ssh" -name 'ssh_host_*' -print -quit 2>/dev/null) ]] || problem "the image carries SSH host keys"
+  [[ $(readlink -- "$root/etc/resolv.conf") == "../run/systemd/resolve/stub-resolv.conf" ]] ||
+    problem "/etc/resolv.conf does not point at systemd-resolved's stub"
+  [[ ! -e $root/usr/local/sbin/pacman && ! -e $root/usr/local/sbin/findmnt ]] || problem "the build's command shims are still in the image"
+  [[ -z $(find "$root/var/cache/pacman/pkg" "$root/tmp" -mindepth 1 -print -quit) ]] || problem "the package cache or /tmp is not empty"
+  [[ -f $root/etc/hostname && $(<"$root/etc/hostname") == "omarchy" ]] || problem "the hostname is not omarchy"
+  [[ ! -L $root/etc/systemd/system/multi-user.target.wants/sshd.service ]] || problem "sshd is still enabled"
+  [[ ! -L $root/etc/systemd/system/multi-user.target.wants/systemd-networkd.service ]] || problem "systemd-networkd is still enabled"
+
+  # Every file belongs to an account the image has: anything else is left over
+  # from the build, and would belong to whichever account takes the id next.
+  known=()
+  while IFS=: read -r name _ id _; do
+    known[$id]=1
+  done <"$root/etc/passwd"
+  while read -r id; do
+    [[ -n ${known[$id]:-} ]] || problem "files are owned by uid $id, which the image has no account for"
+  done < <(find "$root" -xdev -printf '%U\n' | sort -u)
+  known=()
+  while IFS=: read -r name _ id _; do
+    known[$id]=1
+  done <"$root/etc/group"
+  while read -r id; do
+    [[ -n ${known[$id]:-} ]] || problem "files belong to gid $id, which the image has no group for"
+  done < <(find "$root" -xdev -printf '%G\n' | sort -u)
+  exit 0
+)
+
+validate_root() {
+  local report=$work/root-problems status=0
+  local -a problems=()
+
+  root_problems >"$report" || status=$?
+  (( status == 0 )) || fail "the image root checks stopped before the end (status $status)"
+  mapfile -t problems <"$report"
+  rm -f -- "$report"
+  if (( ${#problems[@]} )); then
+    printf 'Error: %s\n' "${problems[@]}" >&2
+    fail "the image root is not ready to pack (${#problems[@]} problems)"
+  fi
+  echo "The image root checks out: manifest, deferred hardware steps, first-boot setup, boot files, [pimarchy] packages and seal"
+}
+
+# ── 17. Pack ─────────────────────────────────────────────────────────────────
+
+# Packs $root into $output/$image_name.img(.xz) without mounts or loop devices:
+# a FAT32 filesystem built from its /boot, an ext4 filesystem built from the
+# rest, both written into an MBR disk image at their partitions' offsets.
+pack_image() {
+  local boot_dir=$work/boot boot_img=$work/boot.img root_img=$work/root.img disk=$work/disk.img
+  local boot_bytes root_bytes root_start used_kib needed_bytes boot_mode boot_owner dump image
+  local -a boot_entries=()
+
+  boot_bytes=$((boot_mib * 1048576))
+  root_start=$((1048576 + boot_bytes))
+
+  # /boot becomes the FAT partition, and the root filesystem keeps an empty
+  # /boot to mount it on.
+  rm -rf -- "$boot_dir"
+  read -r boot_mode boot_owner < <(stat -c '%a %u:%g' -- "$root/boot")
+  mv -- "$root/boot" "$boot_dir"
+  install -d -m "$boot_mode" -o "${boot_owner%%:*}" -g "${boot_owner##*:}" "$root/boot"
+
+  used_kib=$(du -sx --block-size=1K -- "$boot_dir" | cut -f1)
+  (( used_kib * 1024 < boot_bytes * 9 / 10 )) || fail "/boot holds $((used_kib / 1024)) MiB, too much for a $boot_mib MiB boot partition"
+  if [[ -n $(find "$boot_dir" -type l -print -quit) ]]; then
+    fail "/boot holds symlinks, which FAT cannot: $(find "$boot_dir" -type l | head -5 | tr '\n' ' ')"
+  fi
+  if [[ -n $(find "$boot_dir" -mindepth 1 -printf '%P\n' | tr '[:upper:]' '[:lower:]' | sort | uniq -d) ]]; then
+    fail "/boot holds names that differ only in case, which FAT cannot tell apart"
+  fi
+
+  # The ext4 root: what it holds, its inode tables and journal, and room to
+  # spare until it grows on the first boot.
+  used_kib=$(du -sx --block-size=1K -- "$root" | cut -f1)
+  needed_bytes=$((used_kib * 1024 * 115 / 100 + 256 * 1048576))
+  root_bytes=$((image_bytes - root_start))
+  if (( needed_bytes > root_bytes )); then
+    if (( size_explicit )); then
+      fail "the root needs about $((needed_bytes / 1048576)) MiB, more than --size $size_text leaves it ($((root_bytes / 1048576)) MiB); pass a larger --size"
+    fi
+    image_bytes=$(((root_start + needed_bytes + 1073741823) / 1073741824 * 1073741824))
+    root_bytes=$((image_bytes - root_start))
+    warn "the root needs about $((needed_bytes / 1048576)) MiB, more than the default 8G image leaves it, so the image is $((image_bytes / 1073741824)) GiB"
+  fi
+  echo "Image: $((image_bytes / 1048576)) MiB; boot partition $boot_mib MiB; root partition $((root_bytes / 1048576)) MiB holding $((used_kib / 1024)) MiB"
+
+  echo "Building the FAT32 boot filesystem"
+  rm -f -- "$boot_img"
+  mkfs.vfat -F 32 -n BOOT -i "$disk_id" -C "$boot_img" $((boot_bytes / 1024)) >/dev/null
+  shopt -s dotglob nullglob
+  boot_entries=("$boot_dir"/*)
+  shopt -u dotglob nullglob
+  (( ${#boot_entries[@]} )) || fail "/boot is empty"
+  MTOOLS_SKIP_CHECK=1 mcopy -s -m -i "$boot_img" "${boot_entries[@]}" ::/ </dev/null
+  fsck.vfat -n "$boot_img" || fail "the boot filesystem does not check clean"
+
+  echo "Building the ext4 root filesystem"
+  rm -f -- "$root_img"
+  truncate -s "$root_bytes" "$root_img"
+  mke2fs -q -F -t ext4 -L pimarchy-root -U "$root_fs_uuid" -E root_owner=0:0 -d "$root" "$root_img"
+  e2fsck -fn "$root_img" || fail "the root filesystem does not check clean"
+
+  # The kept root is the whole image again; otherwise the root's space comes
+  # back before the disk image takes it.
+  if (( keep_root )); then
+    rmdir -- "$root/boot"
+    mv -- "$boot_dir" "$root/boot"
+  else
+    rm -rf --one-file-system -- "$root" "$boot_dir"
+  fi
+
+  echo "Assembling the disk: label-id 0x$disk_id"
+  rm -f -- "$disk"
+  truncate -s "$image_bytes" "$disk"
+  sfdisk --quiet --no-reread --no-tell-kernel "$disk" >/dev/null <<TABLE
+label: dos
+label-id: 0x$disk_id
+unit: sectors
+sector-size: 512
+
+start=2048, size=$((boot_bytes / 512)), type=c
+start=$((root_start / 512)), size=$((root_bytes / 512)), type=83
+TABLE
+  dd if="$boot_img" of="$disk" bs=1M seek=1 conv=notrunc,sparse status=none
+  rm -f -- "$boot_img"
+  dd if="$root_img" of="$disk" bs=1M seek=$((root_start / 1048576)) conv=notrunc,sparse status=none
+  rm -f -- "$root_img"
+
+  dump=$(sfdisk --dump "$disk")
+  grep -q "^label-id: 0x$disk_id$" <<<"$dump" &&
+    grep -q "start= *2048, size= *$((boot_bytes / 512)), type=c$" <<<"$dump" &&
+    grep -q "start= *$((root_start / 512)), size= *$((root_bytes / 512)), type=83$" <<<"$dump" ||
+    fail "the disk's partition table is not the one written: $dump"
+
+  image=$output/$image_name.img
+  rm -f -- "$image" "$image.xz" "$image.sha256" "$image.xz.sha256"
+  mv -- "$disk" "$image"
+  if (( compress )); then
+    echo "Compressing with xz"
+    xz -T0 -- "$image"
+    image=$image.xz
+  fi
+  (cd -- "$output" && sha256sum -- "${image##*/}" >"${image##*/}.sha256")
+  image_file=$image
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+  parse_options "$@"
+  require_root
+  umask 022
+  prepare_output
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  step "Checking prerequisites"
+  check_prerequisites || fail "prerequisites are missing"
+
+  step "Resolving the Pimarchy source"
+  resolve_source
+  choose_identifiers
+
+  step "Fetching Arch Linux ARM's Raspberry Pi root filesystem"
+  fetch_tarball
+
+  step "Extracting the root filesystem"
+  extract_root
+
+  step "Cloning the Pimarchy source into the image"
+  clone_source
+
+  step "Setting up pacman"
+  setup_pacman
+
+  step "Creating the build's pacman keyring"
+  setup_keyring
+
+  step "Swapping in the Raspberry Pi kernel"
+  swap_kernel
+
+  step "Building Omarchy's packages into the local repository"
+  build_local_packages
+
+  step "Installing Omarchy"
+  install_omarchy
+
+  step "Removing Arch Linux ARM's account and network defaults"
+  scrub_alarm
+
+  step "Running Omarchy's system setup"
+  apply_system
+
+  step "Writing the boot files"
+  setup_boot
+
+  step "Arming first-boot setup"
+  arm_first_boot
+
+  step "Sealing the root filesystem"
+  seal_root
+
+  step "Validating the root filesystem"
+  validate_root
+
+  step "Packing the image"
+  pack_image
+
+  # Crashes under emulation that a rerun recovered from, or that hit a package
+  # scriptlet, which pacman reports and carries on from.
+  crashes=$(grep -cE 'double free or corruption|free\(\): invalid|malloc\(\): |Segmentation fault' "$log_file" || true)
+  if (( crashes )); then
+    warn "$crashes programs crashed under emulation during the build (see 'double free' and 'Segmentation fault' in $log_file); the image checks passed, but look at what each one was doing"
+  fi
+
+  echo
+  echo "Built $image_file in $(((SECONDS - build_started) / 60)) minutes"
+  echo "  sha256 $(cut -d' ' -f1 <"$image_file.sha256")"
+  echo "  commit $commit ($branch), $channel channel"
+  echo "  boot PARTUUID $disk_id-01, root PARTUUID $disk_id-02, root filesystem UUID $root_fs_uuid"
+  echo "Flash it with: xzcat $image_file | dd of=/dev/sdX bs=4M conv=fsync status=progress (see pi/README.md)"
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
