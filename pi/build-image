@@ -421,7 +421,13 @@ check_prerequisites() {
 # ── Output, log and cleanup ──────────────────────────────────────────────────
 
 prepare_output() {
-  install -d -m 0755 -- "$output" "$cache"
+  local dir
+
+  # Only what is missing: install -d would also reset the mode of a directory
+  # that exists, such as a home directory given as --output.
+  for dir in "$output" "$cache"; do
+    [[ -d $dir ]] || install -d -m 0755 -- "$dir"
+  done
   exec {lock_fd}>"$output/.build.lock"
   flock -n "$lock_fd" || fail "another pi/build-image is using $output"
 

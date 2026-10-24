@@ -170,6 +170,16 @@ if [[ $(uname -m) != "aarch64" ]]; then
 fi
 pass "old proot, qemu and mke2fs, a FAT or noexec output, and an output under a private directory fail the prerequisite checks with a reason each"
 
+# ── The output directory ─────────────────────────────────────────────────────
+
+# An --output that exists, such as a home directory, keeps its mode.
+mkdir -m 0700 "$TMPDIR/home"
+output=$(bash -c 'source "$1"; output=$2 cache=$2/cache; prepare_output' bash "$BUILDER" "$TMPDIR/home" 2>&1) ||
+  fail "the build readies an existing output directory" "$output"
+modes=$(stat -c '%a' -- "$TMPDIR/home" "$TMPDIR/home/cache")
+[[ $modes == $'700\n755' ]] || fail "an existing output directory keeps its mode, and a missing cache is made searchable" "$modes"
+pass "an existing output directory keeps its mode, and a missing cache is made searchable"
+
 # ── The kernel swap ──────────────────────────────────────────────────────────
 
 # The family list names the Pi's boot package, which [pimarchy] only has once
