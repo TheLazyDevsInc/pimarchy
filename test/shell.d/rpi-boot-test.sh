@@ -291,9 +291,9 @@ pass "setup-boot is idempotent, puts back what it sets, and keeps the first back
 # While an image's first-boot flag is there, the initramfs hook owns root=:
 # setup-boot keeps the UUID it names, and the flag.
 reset_root
-echo "root=UUID=93f96c19-8612-4030-98f1-3533322a5222 rw rootwait console=tty1 pimarchy.new_disk_id" >"$root/boot/cmdline.txt"
+echo "root=UUID=93f96c19-8612-4030-98f1-3533322a5222 rw rootwait console=tty1 pimarchy.new_disk_id=8a70c72b" >"$root/boot/cmdline.txt"
 on aarch64-rpi setup-boot >/dev/null || fail "setup-boot runs on a first-boot cmdline.txt"
-[[ " $(<"$root/boot/cmdline.txt") " == *" root=UUID=93f96c19-8612-4030-98f1-3533322a5222 "*" pimarchy.new_disk_id "* &&
+[[ " $(<"$root/boot/cmdline.txt") " == *" root=UUID=93f96c19-8612-4030-98f1-3533322a5222 "*" pimarchy.new_disk_id=8a70c72b "* &&
   $(<"$root/boot/cmdline.txt") != *PARTUUID* ]] ||
   fail "setup-boot leaves root= to the disk identifier hook while its flag is there" "$(<"$root/boot/cmdline.txt")"
 pass "setup-boot leaves root= to the disk identifier hook while its first-boot flag is there"
@@ -730,7 +730,7 @@ else
     'PARTUUID=8a70c72b-02  /      ext4  rw,relatime  0 1' \
     'PARTUUID=8a70c72b-01  /boot  vfat  rw,relatime  0 2' \
     'PARTUUID=0badc0de-01  /mnt/usb  vfat  rw  0 2' >"$tmp/fstab"
-  printf 'root=UUID=93f96c19-8612-4030-98f1-3533322a5222 rw rootwait console=tty1 quiet splash pimarchy.new_disk_id\r\n' >"$tmp/cmdline.txt"
+  printf 'root=UUID=93f96c19-8612-4030-98f1-3533322a5222 rw rootwait console=tty1 quiet splash pimarchy.new_disk_id=8a70c72b\r\n' >"$tmp/cmdline.txt"
   output=$(bash -c 'source "$1"; omarchy_rpi_fstab "$2/fstab" 1234abcd && omarchy_rpi_cmdline "$2/cmdline.txt" 1234abcd' \
     bash "$scripts/initcpio-hook" "$tmp" 2>&1) || fail "the hook points fstab and cmdline.txt at the new identifier" "$output"
   [[ $(<"$tmp/fstab") == $'# fstab\nPARTUUID=1234abcd-02  /      ext4  rw,relatime  0 1\nPARTUUID=1234abcd-01  /boot  vfat  rw,relatime  0 2\nPARTUUID=0badc0de-01  /mnt/usb  vfat  rw  0 2' ]] ||
@@ -741,7 +741,7 @@ else
 
   # When fstab can't follow, the late hook writes the old identifier back, so
   # systemd still finds /boot, and leaves cmdline.txt for the next boot.
-  printf 'root=UUID=93f96c19 rw pimarchy.new_disk_id\n' >"$tmp/cmdline.txt"
+  printf 'root=UUID=93f96c19 rw pimarchy.new_disk_id=8a70c72b\n' >"$tmp/cmdline.txt"
   output=$(PATH="$idbin:$PATH" bash -c '
     source "$1"
     mountpoint() { return 1; }
@@ -751,7 +751,7 @@ else
     run_latehook
   ' bash "$scripts/initcpio-hook" "$disk" 2>&1) || fail "the late hook copes with a root it can't update" "$output"
   [[ $(sfdisk --dump "$disk" | sed -n 's/^label-id: //p') == "0x$new" && $output == *"keeps its identifier"* &&
-    $(<"$tmp/cmdline.txt") == "root=UUID=93f96c19 rw pimarchy.new_disk_id" ]] ||
+    $(<"$tmp/cmdline.txt") == "root=UUID=93f96c19 rw pimarchy.new_disk_id=8a70c72b" ]] ||
     fail "a new identifier fstab can't follow goes back, and cmdline.txt keeps the flag" "$output $(sfdisk --dump "$disk" | grep label-id)"
   pass "a new identifier fstab can't follow goes back to the old one, and the next boot tries again"
 fi

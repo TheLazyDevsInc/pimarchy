@@ -468,7 +468,7 @@ else
   for file in kernel8.img initramfs-linux.img bcm2711-rpi-400.dtb start4.elf fixup4.dat; do
     printf 'x' >"$root/boot/$file"
   done
-  printf 'root=UUID=%s rw rootwait console=tty1 quiet splash pimarchy.new_disk_id\n' "$root_fs_uuid" >"$root/boot/cmdline.txt"
+  printf 'root=UUID=%s rw rootwait console=tty1 quiet splash pimarchy.new_disk_id=%s\n' "$root_fs_uuid" "$disk_id" >"$root/boot/cmdline.txt"
   printf '[all]\ninitramfs initramfs-linux.img followkernel\n' >"$root/boot/config.txt"
   mkdir -p "$root/usr/lib/initcpio/hooks" "$root/etc/mkinitcpio.conf.d"
   : >"$root/usr/lib/initcpio/hooks/omarchy-rpi-disk-id"
@@ -556,12 +556,12 @@ else
   expect_problem "a root whose root password is not locked is refused" "root's password is not locked"
   printf 'root:!:20000::::::\n' >"$root/etc/shadow"
 
-  printf 'root=/dev/mmcblk0p2 rw rootwait pimarchy.new_disk_id\n' >"$root/boot/cmdline.txt"
-  expect_problem "a cmdline.txt that names another root is refused" "does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id"
+  printf 'root=/dev/mmcblk0p2 rw rootwait pimarchy.new_disk_id=%s\n' "$disk_id" >"$root/boot/cmdline.txt"
+  expect_problem "a cmdline.txt that names another root is refused" "does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id=$disk_id"
   printf 'root=UUID=%s rw rootwait console=tty1 quiet splash\n' "$root_fs_uuid" >"$root/boot/cmdline.txt"
   expect_problem "a cmdline.txt without the first-boot flag is refused, since the card would keep the image's identifier" \
-    "does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id"
-  printf 'root=UUID=%s rw rootwait console=tty1 quiet splash pimarchy.new_disk_id\n' "$root_fs_uuid" >"$root/boot/cmdline.txt"
+    "does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id=$disk_id"
+  printf 'root=UUID=%s rw rootwait console=tty1 quiet splash pimarchy.new_disk_id=%s\n' "$root_fs_uuid" "$disk_id" >"$root/boot/cmdline.txt"
 
   mv "$root/usr/lib/initcpio/hooks/omarchy-rpi-disk-id" "$TMPDIR/omarchy-rpi-disk-id"
   expect_problem "a root without the disk identifier hook is refused" "omarchy-rpi-disk-id initramfs hook is missing"

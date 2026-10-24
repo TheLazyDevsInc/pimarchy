@@ -12,7 +12,8 @@ build() {
 help() {
     cat <<HELPEOF
 Gives a flashed Pimarchy image's disk an MBR identifier of its own on its first
-boot, when the kernel command line carries pimarchy.new_disk_id, and points
-fstab and cmdline.txt at the new PARTUUIDs. Without the flag it does nothing.
+boot, when the kernel command line carries pimarchy.new_disk_id=<the image's
+identifier>, and points fstab and cmdline.txt at the new PARTUUIDs. Without
+the flag it does nothing.
 HELPEOF
 }

@@ -9,11 +9,15 @@
 # and so with the same PARTUUIDs (<id>-01, <id>-02), which cmdline.txt and fstab
 # name. With two such disks attached, a boot could mount either. So the image
 # boots the first time by its root filesystem's UUID, which no identifier change
-# touches, with pimarchy.new_disk_id on the kernel command line, and:
+# touches, with pimarchy.new_disk_id=<the image's identifier> on the kernel
+# command line, and:
 #
-# - before the root is mounted, this writes a random identifier into the MBR,
-#   has the kernel read the partition table again, and mounts the root by its
-#   device for this boot, before udev or systemd in the root see the disk;
+# - before the root is mounted, this picks the root: of the partitions with
+#   that UUID (every card from the image has it), the one on a disk that still
+#   carries the image's identifier, so a card renewed before can't stand in for
+#   a new one. It writes a random identifier into that disk's MBR, has the
+#   kernel read the partition table again, and mounts the root by its device
+#   for this boot (and checks it), before udev or systemd in the root see it;
 # - once the root is mounted, it points fstab's / and /boot at the new
 #   PARTUUIDs, then commits: cmdline.txt names the root by its new PARTUUID and
 #   drops the flag, written to a temporary file and renamed over the original.
@@ -33,6 +37,15 @@
 omarchy_rpi_disk_id() {
     dd if="$1" bs=1 skip=440 count=4 2>/dev/null | hexdump -v -e '/1 "%02x"' |
         sed 's/^\(..\)\(..\)\(..\)\(..\)$/\4\3\2\1/'
+}
+
+# The disk holding partition device $1, when it is that disk's partition 2.
+omarchy_rpi_disk_of() {
+    local name=${1##*/} disk
+
+    [ "$(cat "/sys/class/block/$name/partition" 2>/dev/null)" = "2" ] || return 1
+    disk=$(readlink -f "/sys/class/block/$name/..") || return 1
+    printf '/dev/%s\n' "${disk##*/}"
 }
 
 # Writes identifier $2 (eight hex digits, as sfdisk prints it) into MBR disk $1.
@@ -81,7 +94,7 @@ omarchy_rpi_cmdline() {
     for token in $line; do
         case $token in
             root=*) token=root=PARTUUID=$2-02 ;;
-            pimarchy.new_disk_id) continue ;;
+            pimarchy.new_disk_id | pimarchy.new_disk_id=*) continue ;;
         esac
         out="${out:+$out }$token"
     done
@@ -90,12 +103,16 @@ omarchy_rpi_cmdline() {
 }
 
 run_hook() {
-    local device name disk boot entry old new
+    local token image_id="" device candidate disk boot entry old new
 
-    case " $(cat /proc/cmdline) " in
-        *" pimarchy.new_disk_id "*) ;;
-        *) return 0 ;;
-    esac
+    set -f
+    for token in $(cat /proc/cmdline); do
+        case $token in
+            pimarchy.new_disk_id=*) image_id=${token#*=} ;;
+        esac
+    done
+    set +f
+    [ -n "$image_id" ] || return 0
 
     # A root that appeared after udev settled resolves to its /dev/disk/by-*
     # link.
@@ -103,13 +120,22 @@ run_hook() {
         err "omarchy-rpi-disk-id: cannot find the root ($root), so the disk keeps its identifier"
         return 0
     fi
-    name=${device##*/}
-    if [ "$(cat "/sys/class/block/$name/partition" 2>/dev/null)" != "2" ]; then
+    for candidate in $(blkid -c /dev/null -o device -t "$root" 2>/dev/null); do
+        candidate=$(readlink -f "$candidate") || continue
+        disk=$(omarchy_rpi_disk_of "$candidate") || continue
+        if [ "$(omarchy_rpi_disk_id "$disk")" = "$image_id" ]; then
+            device=$candidate
+            break
+        fi
+    done
+    # This boot mounts and checks the partition picked, whatever happens next.
+    root=$device
+    sed -i "s|^root=.*|root=$device|" /tmp/cmdline 2>/dev/null || true
+
+    if ! disk=$(omarchy_rpi_disk_of "$device"); then
         err "omarchy-rpi-disk-id: $device is not partition 2 of a disk, so the disk keeps its identifier"
         return 0
     fi
-    disk=$(readlink -f "/sys/class/block/$name/..")
-    disk=/dev/${disk##*/}
     if [ "$(dd if="$disk" bs=1 skip=510 count=2 2>/dev/null | hexdump -v -e '/1 "%02x"')" != "55aa" ]; then
         err "omarchy-rpi-disk-id: $disk has no MBR partition table, so it keeps its identifier"
         return 0
@@ -135,8 +161,6 @@ run_hook() {
     partprobe "$disk" >/dev/null 2>&1 || true
     msg ":: gave $disk the identifier $new (it was $old)"
 
-    # The PARTUUIDs this boot's tags would resolve to have just changed.
-    root=$device
     omarchy_rpi_disk=$disk
     omarchy_rpi_old_id=$old
     omarchy_rpi_new_id=$new

@@ -152,7 +152,7 @@ has() {
 # once fstab follows it.
 root_token=root=PARTUUID=$partuuid
 for token in "${tokens[@]}"; do
-  if [[ $token == "pimarchy.new_disk_id" ]]; then
+  if [[ $token == "pimarchy.new_disk_id" || $token == pimarchy.new_disk_id=* ]]; then
     for token in "${tokens[@]}"; do
       if [[ $token == root=* ]]; then
         root_token=$token
