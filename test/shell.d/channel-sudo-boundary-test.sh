@@ -72,9 +72,10 @@ done
 
 # Every aarch64 platform switches to each channel it has templates for, copying
 # its own: Apple Silicon to edge and dev, every other one to all four.
-for platform in aarch64 aarch64-apple; do
+for platform in aarch64 aarch64-apple aarch64-rpi; do
   case $platform in
     aarch64-apple) templates=default/pacman/aarch64-apple channels="edge dev" ;;
+    aarch64-rpi) templates=default/pacman/aarch64-rpi channels="stable rc edge dev" ;;
     *) templates=default/pacman/aarch64 channels="stable rc edge dev" ;;
   esac
   for channel in $channels; do
@@ -87,9 +88,18 @@ for platform in aarch64 aarch64-apple; do
     # The caller renders from the platform's template; root copies the result.
     grep -Eq "^step:cp $root/$templates/pacman-$pacman_channel.conf [^ ]+/pacman.conf\$" "$SUDO_TEST_LOG" ||
       fail "$platform $channel renders its own template" "$(<"$SUDO_TEST_LOG")"
+    # A Pi's omarchy pair comes from its own builds on every channel, and its
+    # local repository exists before its templates name it.
+    if [[ $platform == "aarch64-rpi" ]]; then
+      grep -qx 'step:pacman -S --needed --noconfirm --ask 4 omarchy omarchy-settings' "$SUDO_TEST_LOG" ||
+        fail "the Pi keeps its own omarchy pair on $channel" "$(<"$SUDO_TEST_LOG")"
+      grep -qx 'step:omarchy-update-rpi-pkgs --init' "$SUDO_TEST_LOG" ||
+        fail "the Pi makes sure of its local repository on $channel" "$(<"$SUDO_TEST_LOG")"
+    fi
   done
 done
 pass "aarch64 platforms switch to every channel they have templates for through their own templates"
+pass "a Raspberry Pi keeps omarchy and omarchy-settings from its local builds on every channel"
 
 # Apple Silicon has edge templates alone: it refuses stable and rc before
 # anything changes.

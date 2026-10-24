@@ -178,6 +178,12 @@ platform=$(omarchy-hw-platform) || fail "Cannot tell this machine's platform; no
 templates=$(omarchy_pacman_templates "$platform") || exit 1
 [[ -f $templates/pacman-$pacman_channel.conf && -f $templates/mirrorlist-$pacman_channel ]] ||
   fail "Omarchy has no $pacman_channel channel for $platform; nothing changed."
+# A Raspberry Pi installs omarchy and omarchy-settings from its own builds in
+# its local [pimarchy] repository on every channel: [omarchy]'s -dev pair
+# doesn't know the Pi. A channel there picks the repositories beside them.
+if [[ $platform == "aarch64-rpi" ]]; then
+  packages=(omarchy omarchy-settings)
+fi
 
 if [[ $channel == "dev" ]]; then
   confirm_dev || { echo "Cancelled."; exit 0; }
