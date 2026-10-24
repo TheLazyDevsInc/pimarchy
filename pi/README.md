@@ -19,7 +19,7 @@ This directory builds Pimarchy, this fork's Omarchy for the Raspberry Pi 400, as
 
 `pi/build-image` runs on an x86_64 or aarch64 Linux computer, as root. It needs no loop devices and leaves no mounts behind. It runs every command meant for the image inside the image root, so package installs, scriptlets and Omarchy's own setup run as they would on the Pi, only slower on x86_64. It has two ways to do that, and picks one with `--runner`:
 
-- `chroot`, the default wherever it works: each command runs in a real chroot inside its own private mount namespace, whose mounts (`/proc`, `/sys`, `/dev`, the package cache) go when the command does. On x86_64 the kernel runs the image's aarch64 programs through qemu-user, registered with binfmt_misc. A build takes about an hour and a half on x86_64.
+- `chroot`, the default wherever it works: each command runs in a real chroot inside its own private mount namespace, whose mounts (`/proc`, `/sys`, `/dev`, the package cache) go when the command does. On x86_64 the kernel runs the image's aarch64 programs through qemu-user, registered with binfmt_misc. A build took about an hour and a quarter on a 4-core x86_64 host, half of it compressing the image.
 - `proot`, for a host that can't register binfmt_misc handlers, such as an unprivileged container: proot maps the image root and runs its programs through qemu-user itself. It traces every system call, so a build takes several hours.
 
 Either way, expect to need about 25 GiB of free disk where `--output` points. Everything the build runs inside the image runs as root on this computer's kernel, with its network, `/dev` and `/sys`. Package scripts and Omarchy's setup are written for the machine they install, so build in a container or a throwaway VM rather than on a computer you care about.
@@ -28,7 +28,7 @@ Either way, expect to need about 25 GiB of free disk where `--output` points. Ev
 sudo pi/build-image --output ~/pimarchy-image
 ```
 
-That builds `HEAD` of the checkout the script lives in, on the stable channel, into an 8 GiB image. If the installed system doesn't fit in 8 GiB, the image grows to the next whole GiB that fits it. The output directory then holds the image, its `.sha256` and `build.log`.
+That builds `HEAD` of the checkout the script lives in, on the stable channel, into an image of at least 8 GiB: if the installed system doesn't fit in 8 GiB, the image grows to the next whole GiB that fits it. Today's system takes about 9.5 GiB, so the image is 12 GiB (about 2.9 GB compressed) and needs a 16 GB card or larger. The output directory then holds the image, its `.sha256` and `build.log`.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
