@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-Omarchy is an Arch Linux desktop built on the Hyprland compositor and a Quickshell desktop shell, developed here as a fork of `omacom/omarchy`. The default branch is `quattro` (the 4.0 line; see `version`). The code is almost entirely bash (`bin/`, `install/`, `migrations/`, `test/`), QML plus plain JavaScript (`shell/`), and Lua (Hyprland config under `default/hypr/` and `config/hypr/`). There is no build step: the checkout *is* the product, installed to `/usr/share/omarchy` and exposed to all runtime code as `$OMARCHY_PATH`.
+Omarchy is an Arch Linux desktop built on the Hyprland compositor and a Quickshell desktop shell, developed here as a fork of `omacom/omarchy` ("Pimarchy") whose addition is a Raspberry Pi 400 port. The default branch is `quattro` (the 4.0 line; see `version`). The code is almost entirely bash (`bin/`, `install/`, `migrations/`, `test/`), QML plus plain JavaScript (`shell/`), and Lua (Hyprland config under `default/hypr/` and `config/hypr/`). There is no build step: the checkout *is* the product, installed to `/usr/share/omarchy` and exposed to all runtime code as `$OMARCHY_PATH`.
 
 Packaging and installation live in sibling repositories, not here. `omarchy-pkgs` holds the PKGBUILDs that split this tree into the `omarchy` package (runtime: `bin/`, `install/`, `migrations/`, `themes/`, `shell/`) and the `omarchy-settings` package (everything that must exist before the user is created: `config/**` as `/etc/skel`, `etc/`, `default/`, fonts, branding). `omarchy-iso` builds the installer and runs the graphical acceptance suite. `docs/file-layout.md` has the full repo-path to installed-path map and a "where does X live?" table; consult it before adding a file anywhere other than `bin/`.
 
@@ -66,10 +66,16 @@ CLIs talk to the shell over IPC through `bin/omarchy-shell <target> <method> ...
 
 Model logic deliberately lives in plain `.js` files (`MenuModel.js`, `BarModel.js`, `NotificationLogic.js`, `panels/*/Model.js`, ...) that end in a guarded `module.exports`. QML imports them directly and Node loads them as CommonJS, which is what lets `test/shell.d/` test shell behaviour without a compositor; keep new shell logic in that shape. `docs/omarchy-shell.md`, `shell/README.md`, and `shell/plugins/README.md` are the references, and `agents/skills/shell-dev.md` warns that bar widget files contain raw Nerd Font glyphs that wholesale rewrites can corrupt.
 
+### The Raspberry Pi port
+
+Everything Pi-specific hangs off the `aarch64-rpi` platform family, one of the aarch64 families `bin/omarchy-hw-platform` reports from device-tree `compatible` tokens (`raspberrypi,*`) or, while an image is built, from the image-target manifest; feature code asks `omarchy-hw-aarch64-rpi`. The family brings its package list (`install/omarchy-aarch64-rpi.packages`: `linux-rpi`, the Pi firmware, `omarchy-rpi-boot`), pacman templates (`default/pacman/aarch64-rpi/`, which put a local `[pimarchy]` repository before `[omarchy]`), an initramfs baseline, hardware leaves under `install/hardware/rpi/`, and a platform boot package registered in `omarchy-lifecycle-dispatch`. `pi/` ships in no package: `pi/pkgbuilds/` holds the PKGBUILDs the Pi builds its own `omarchy`, `omarchy-settings` and `omarchy-rpi-boot` from (via `bin/omarchy-update-rpi-pkgs` on every `omarchy update`), `pi/rpi-boot/` the boot package's sources, and `pi/build-image` the SD-card image builder. `docs/raspberry-pi.md` is the reference, `pi/README.md` covers building and flashing, and `plans/pi-400-port.md` records the design.
+
+`sudo pi/build-image --output DIR` builds the image as root on an x86_64 or aarch64 host, running the image's programs in a binfmt_misc chroot (or under proot with `--runner proot`) through qemu-user 10 or newer; it takes over an hour and about 25 GiB, so run it in a throwaway VM or container. Its functions are unit-tested by `test/shell.d/pi-build-image-test.sh`, which sources it.
+
 ### Hyprland config is Lua
 
 `default/hypr/*.lua` is the package-owned Hyprland configuration (`bootstrap.lua`, `bindings/`, `apps/`, `toggles/`, `windows.lua`, ...) and `config/hypr/*.lua` is the thin user-editable layer seeded into `~/.config/hypr/`. `.luarc.json` points the Lua language server at `/usr/share/hypr/stubs` and declares the `hl` global.
 
 ## Reference docs
 
-`docs/` is the system-shape reference: `file-layout.md` (repo to installed map, `$HOME` layers, env bootstrap), `cli-router.md`, `omarchy-shell.md` (plugins, IPC, `shell.json`, theme tokens), `theming.md`, `menu.md`, `notifications.md`, `update-process.md`, `testing.md`, and `audio-tuning.md`. `manual/` is end-user documentation and `plans/` holds design proposals; neither documents internals.
+`docs/` is the system-shape reference: `file-layout.md` (repo to installed map, `$HOME` layers, env bootstrap), `cli-router.md`, `omarchy-shell.md` (plugins, IPC, `shell.json`, theme tokens), `theming.md`, `menu.md`, `notifications.md`, `update-process.md`, `lifecycle-dispatch.md`, `raspberry-pi.md`, `testing.md`, and `audio-tuning.md`. `manual/` is end-user documentation and `plans/` holds design proposals; neither documents internals.
