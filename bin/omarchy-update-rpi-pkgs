@@ -16,7 +16,8 @@
 # that installs the Pi's templates runs this first. Without it, this also
 # fast-forwards the checkout and, when it has moved since the last build,
 # builds the three packages from its pi/pkgbuilds/ and publishes them, which
-# omarchy update does before its package transaction.
+# omarchy update does before its package transaction. A checkout with
+# uncommitted changes is left alone and nothing is built.
 #
 # The repository and the checkout belong to root, but makepkg refuses to build
 # as root. Run as a user, this builds as that user and reaches root through
@@ -190,8 +191,18 @@ pkgbuild_with_version() {
 
 echo -e "\e[32m\nUpdate Omarchy's Raspberry Pi packages\e[0m"
 
-# Fast-forward only. Local changes or local commits are someone's work: leave
-# them, say so, and build what is there.
+# The packages copy the checkout's working tree, so a build of uncommitted
+# changes would carry them under the name of a commit that lacks them. Leave
+# such a checkout alone, neither merged nor built, and say how to go on: a
+# hand-edited file holds up only this step, not the rest of the update.
+if [[ -n $(src_git status --porcelain --untracked-files=no) ]]; then
+  warn "The Pimarchy checkout at $src has uncommitted changes, so it is neither updated nor built: the Pi keeps the packages it has."
+  warn "Commit them to have them built, or set them aside to follow its upstream again: sudo git -C $src stash"
+  exit 0
+fi
+
+# Fast-forward only. Local commits are someone's work: leave them, say so, and
+# build what is there.
 #
 # Root fetches with no terminal to ask for credentials on and a time limit, so
 # a repository that went private or a stalled network can't hold the update.
@@ -202,10 +213,10 @@ if ! as_root env GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$src" fetch --quiet -
   warn "Could not fetch the Pimarchy checkout at $src from its origin; building what is there."
 elif ! upstream=$(src_git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
   warn "The Pimarchy checkout at $src follows no branch of its origin, or that branch is gone from it; building what is there."
-elif [[ -n $(src_git status --porcelain --untracked-files=no) ]]; then
-  warn "The Pimarchy checkout at $src has local changes; building what is there."
 elif ! src_git merge --ff-only --quiet "$upstream" 2>/dev/null; then
   warn "The Pimarchy checkout at $src cannot fast-forward to $upstream; building what is there."
+elif [[ -n $(src_git rev-list --max-count=1 "$upstream..HEAD") ]]; then
+  warn "The Pimarchy checkout at $src has local commits that $upstream lacks; building them."
 fi
 
 head=$(src_git rev-parse HEAD)

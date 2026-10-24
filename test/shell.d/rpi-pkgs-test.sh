@@ -352,28 +352,39 @@ expect_versions
 [[ $(db_entries) == "$expected_packages" ]] || fail "the next run publishes the commit that failed before" "$(db_entries)"
 pass "the next run builds what failed before"
 
-# ── a checkout that can't fast-forward ──────────────────────────────────────
+# ── local work in the checkout ───────────────────────────────────────────────
 
-built=$(<"$repo/.built-commit")
-push_commit "Fourth"
-echo "local edit" >>"$src/CHANGES"
-run || fail "a checkout with local changes still runs" "$(output)"
-grep -q "has local changes; building what is there" "$test_tmp/out" || fail "local changes are reported" "$(output)"
-[[ $("$real_git" -C "$src" rev-parse HEAD) == "$built" ]] || fail "a checkout with local changes is not merged"
-! grep -q ' merge ' "$log" || fail "a checkout with local changes is not merged" "$(output)"
-grep -q "up to date" "$test_tmp/out" || fail "what is there was already built" "$(output)"
-"$real_git" -C "$src" checkout -q -- CHANGES
-pass "a checkout with local changes is left alone and built as it is"
-
+# A local commit not built yet, an uncommitted change on top of it, and a new
+# commit upstream.
 echo "local commit" >"$src/LOCAL"
 "$real_git" -C "$src" add LOCAL
 "$real_git" -C "$src" commit -qm "Local"
+local_commit=$("$real_git" -C "$src" rev-parse HEAD)
+echo "local edit" >>"$src/LOCAL"
+push_commit "Fourth"
+before=$(repo_state)
+run || fail "a checkout with uncommitted changes lets the update go on" "$(output)"
+grep -q "has uncommitted changes, so it is neither updated nor built" "$test_tmp/out" || fail "uncommitted changes are reported" "$(output)"
+grep -qF "sudo git -C $src stash" "$test_tmp/out" || fail "the warning says how to set the changes aside" "$(output)"
+[[ $("$real_git" -C "$src" rev-parse HEAD) == "$local_commit" ]] || fail "a checkout with uncommitted changes is not merged"
+[[ -z $(makepkg_runs) && $(repo_state) == "$before" ]] ||
+  fail "uncommitted changes are never built under the name of the commit they sit on" "$(output)"
+"$real_git" -C "$src" checkout -q -- LOCAL
+pass "a checkout with uncommitted changes is neither merged nor built, and the warning says how to set them aside"
+
 run || fail "a diverged checkout still builds" "$(output)"
 grep -q "cannot fast-forward to origin/quattro; building what is there" "$test_tmp/out" || fail "a diverged checkout is reported" "$(output)"
 expect_versions
 [[ $(makepkg_runs) == "omarchy-settings-$omarchy_version omarchy-$omarchy_version omarchy-rpi-boot-$boot_version " &&
   $(db_entries) == "$expected_packages" ]] || fail "a diverged checkout builds its own HEAD" "$(output)"
 pass "a diverged checkout is built as it is"
+
+"$real_git" -C "$src" merge -q --no-edit origin/quattro
+run || fail "a checkout ahead of its upstream builds" "$(output)"
+grep -q "has local commits that origin/quattro lacks; building them" "$test_tmp/out" || fail "local commits are reported" "$(output)"
+expect_versions
+[[ $(db_entries) == "$expected_packages" ]] || fail "a checkout ahead of its upstream builds its own HEAD" "$(output)"
+pass "a checkout ahead of its upstream is built as it is, with a warning"
 
 before=$(repo_state)
 if ! RPI_TEST_OFFLINE=1 run; then fail "an offline run still succeeds" "$(output)"; fi
@@ -413,7 +424,7 @@ pass "a build as root, or --as-user without a user, is refused"
 # ── mismatched versions ──────────────────────────────────────────────────────
 
 sed -i 's/^pkgver=.*/pkgver=9.9.9/' "$src/pi/pkgbuilds/omarchy-settings/PKGBUILD"
-rm "$repo/.built-commit"
+"$real_git" -C "$src" commit -qam "Mismatch"
 before=$(repo_state)
 if run; then fail "omarchy and omarchy-settings with different pkgver values are refused"; fi
 grep -q "omarchy and omarchy-settings set different pkgver values" "$test_tmp/out" || fail "the mismatch is named" "$(output)"
