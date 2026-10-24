@@ -19,6 +19,7 @@ steps=(
   omarchy-snapshot
   omarchy-update-stay-awake
   omarchy-update-dev
+  omarchy-update-rpi-pkgs
   omarchy-update-boot
   omarchy-update-keyring
   omarchy-update-system-pkgs
@@ -64,8 +65,9 @@ steps_run() {
   cut -d' ' -f1 "$test_tmp/steps"
 }
 
-# Every step of a whole update, in order. $1 asks for the one a person confirms.
-# Stay Awake bookends the work, so it is here twice.
+# Every step of a whole update, in order. $1 asks for the one a person confirms,
+# $2 for a Raspberry Pi's local package builds. Stay Awake bookends the work, so
+# it is here twice.
 expected_steps() {
   printf '%s\n' \
     omarchy-update-lock \
@@ -75,6 +77,7 @@ expected_steps() {
     omarchy-snapshot \
     omarchy-update-stay-awake \
     omarchy-update-dev \
+    ${2:+omarchy-update-rpi-pkgs} \
     omarchy-update-keyring \
     omarchy-update-system-pkgs \
     omarchy-migrate \
@@ -123,3 +126,21 @@ for step in omarchy-migrate omarchy-hook omarchy-update-aur-pkgs omarchy-update-
   fi
 done
 pass "a blocked package upgrade stops the update before it migrates"
+
+# A Raspberry Pi installs Omarchy's own packages from a repository built from its
+# Pimarchy checkout. They are rebuilt after the dev checkout moves and before
+# the keyring and the transaction that installs them.
+SUDO_TEST_PLATFORM=aarch64-rpi run_update -y || fail "an update on a Raspberry Pi reports a failure"
+diff <(expected_steps "" pi) <(steps_run) >"$test_tmp/order" ||
+  fail "a Raspberry Pi's update does not build its local packages between the dev checkout and the keyring" "$(cat "$test_tmp/order")"
+pass "on a Raspberry Pi the local packages are rebuilt before the keyring and the package transaction, and nowhere else"
+
+if SUDO_TEST_PLATFORM=aarch64-rpi FAILING_STEP=omarchy-update-rpi-pkgs run_update -y; then
+  fail "an update whose local package build failed passes for a whole one"
+fi
+for step in omarchy-update-keyring omarchy-update-system-pkgs omarchy-migrate; do
+  if grep -q "^$step " "$test_tmp/steps"; then
+    fail "a failed local package build still runs $step"
+  fi
+done
+pass "a failed local package build stops the update before the package transaction"

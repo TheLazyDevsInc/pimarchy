@@ -119,6 +119,12 @@ if [[ ${1:-} == "-y" ]] || omarchy-update-confirm; then
 
   # Preserve the established development-checkout update ordering.
   omarchy-update-dev
+  # A Raspberry Pi installs Omarchy's own packages from a local repository built
+  # from its Pimarchy checkout. Rebuild it first, so the transaction below
+  # installs what the checkout holds now.
+  if omarchy-hw-aarch64-rpi; then
+    omarchy-update-rpi-pkgs
+  fi
   omarchy-update-keyring
 
   # Migrations ship with the packages installed here and are written against

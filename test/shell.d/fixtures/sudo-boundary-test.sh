@@ -51,6 +51,11 @@ cat >"$SUDO_TEST_ROOT/bin/omarchy-hw-platform" <<'STUB'
 echo "${SUDO_TEST_PLATFORM:-x86}"
 STUB
 chmod +x "$SUDO_TEST_ROOT/bin/omarchy-hw-platform"
+cat >"$SUDO_TEST_ROOT/bin/omarchy-hw-aarch64-rpi" <<'STUB'
+#!/bin/bash
+[[ ${SUDO_TEST_PLATFORM:-x86} == "aarch64-rpi" ]]
+STUB
+chmod +x "$SUDO_TEST_ROOT/bin/omarchy-hw-aarch64-rpi"
 
 cat >"$SUDO_TEST_ROOT/mock/sudo" <<'STUB'
 #!/bin/bash
