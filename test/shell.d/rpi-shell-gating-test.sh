@@ -6,8 +6,9 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 # The Pi 400 has no battery and no power-profiles-daemon support (no
 # /sys/class/power_supply, no platform_profile, no intel_pstate/amd_pstate).
-# These assertions pin the gating that stops the battery service's two
-# background timers from polling that hardware forever.
+# These assertions pin that the battery service spawns nothing on a schedule
+# for that hardware: the low-battery check only runs with a battery present,
+# and the power profile follows the daemon's change signals instead of a poll.
 
 run_node_test <<'JS'
 const battery = requireFromRoot('shell/plugins/services/battery/BatteryModel.js')
@@ -23,18 +24,18 @@ JS
 
 service_qml="$ROOT/shell/plugins/services/battery/Service.qml"
 
-if grep -q 'running: true' "$service_qml"; then
-  fail "battery service timers no longer hardcode running: true"
-fi
-pass "battery service timers no longer hardcode running: true"
-
 rg -F 'running: root.batteryPresent' "$service_qml" >/dev/null ||
   fail "battery check timer gates on battery presence"
 pass "battery check timer gates on battery presence"
 
-rg -F 'running: root.powerProfilesAvailable' "$service_qml" >/dev/null ||
-  fail "power profile poll gates on power-profiles-daemon availability"
-pass "power profile poll gates on power-profiles-daemon availability"
+if rg -U 'Timer \{[^}]*onTriggered: root\.refreshPowerProfile\(\)' "$service_qml" >/dev/null; then
+  fail "power profile is not polled on a timer"
+fi
+pass "power profile is not polled on a timer"
+
+rg -F 'target: PowerProfiles' "$service_qml" >/dev/null ||
+  fail "power profile follows power-profiles-daemon change signals"
+pass "power profile follows power-profiles-daemon change signals"
 
 # Regression guard: nobody "simplifies" the daemon read back to
 # `powerprofilesctl get`, which is the PyGObject script that caused the daily
