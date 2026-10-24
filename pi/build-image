@@ -1785,11 +1785,12 @@ pack_image() {
   echo "Partitioning the disk: label-id 0x$disk_id"
   rm -f -- "$disk"
   truncate -s "$image_bytes" "$disk"
+  # sfdisk takes a file's sectors as 512 bytes. The table has no sector-size
+  # line, which sfdisk before util-linux 2.35.2 refuses.
   sfdisk --quiet --no-reread --no-tell-kernel "$disk" >/dev/null <<TABLE
 label: dos
 label-id: 0x$disk_id
 unit: sectors
-sector-size: 512
 
 start=2048, size=$((boot_bytes / 512)), type=c
 start=$((root_start / 512)), size=$((root_bytes / 512)), type=83
