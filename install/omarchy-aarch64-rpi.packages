@@ -13,6 +13,10 @@ linux-rpi-headers
 # Wi-Fi and Bluetooth firmware for its Cypress radio. Both come from [alarm].
 raspberrypi-bootloader
 firmware-raspberrypi
+# The Pi's boot package (pi/pkgbuilds/omarchy-rpi-boot, built on the Pi into
+# [pimarchy]): hardware setup's setup-boot and the update's update-verify need
+# it (docs/lifecycle-dispatch.md), and it grows a flashed image's root.
+omarchy-rpi-boot
 # vcgencmd, pinctrl and the EEPROM tools' dependencies.
 raspberrypi-utils
 # The bootloader EEPROM updater omarchy-update-firmware runs on a Pi 4 or 400.

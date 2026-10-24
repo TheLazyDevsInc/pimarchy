@@ -100,8 +100,9 @@ done
 grep -Fxq linux-omarchy <<<"$(names_of aarch64-n1x)" || fail "the N1x list names its kernel"
 # The Pi boots the Raspberry Pi kernel from its own firmware: Omarchy's aarch64
 # kernel has no BCM2711 support, and Limine needs UEFI, which the Pi lacks. Its
-# display and GPU are separate devices, so it records the screen as the Mac does.
-for package in linux-rpi raspberrypi-bootloader firmware-raspberrypi vulkan-broadcom wf-recorder; do
+# display and GPU are separate devices, so it records the screen as the Mac does,
+# and its boot package implements the boot operations lifecycle dispatch requires.
+for package in linux-rpi raspberrypi-bootloader firmware-raspberrypi vulkan-broadcom wf-recorder omarchy-rpi-boot; do
   grep -Fxq "$package" <<<"$(names_of aarch64-rpi)" || fail "the Pi list names $package"
 done
 ! grep -Eqx 'linux-omarchy|limine.*|snapper' <<<"$(names_of aarch64-rpi)" || fail "the Pi list leaves out the UEFI boot stack"
