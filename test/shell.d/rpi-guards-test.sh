@@ -88,7 +88,8 @@ pass "the menu hides Direct Boot on a Pi and keeps it on x86 and other ARM machi
 # omarchy-update-firmware: the bootloader EEPROM on a Pi, fwupd elsewhere.
 # rpi-eeprom-update reports, exiting 1 when an update is available, and stages
 # the update with -a. It records its stdin, since with a terminal there it
-# would ask before installing.
+# would ask before installing. The command gets a stdin other than /dev/null,
+# which the runner gives every test, so only its own redirect passes.
 record_stub fwupdmgr
 record_stub omarchy-pkg-add
 record_stub omarchy-state
@@ -105,13 +106,13 @@ exit "${TEST_EEPROM_STATUS:-0}"
 SH
 chmod +x "$stub_bin/rpi-eeprom-update"
 
-output=$(TEST_EEPROM_STATUS=0 run pi400 "$ROOT/bin/omarchy-update-firmware") || fail "an up-to-date Pi bootloader is a success"
+output=$(TEST_EEPROM_STATUS=0 run pi400 "$ROOT/bin/omarchy-update-firmware" <"$ROOT/version") || fail "an up-to-date Pi bootloader is a success"
 [[ $(grep -c '^rpi-eeprom-update' "$CALL_LOG") == 1 ]] || fail "an up-to-date Pi only checks its bootloader" "$(<"$CALL_LOG")"
 grep -Fxq 'rpi-eeprom-update  stdin=/dev/null' "$CALL_LOG" || fail "the check runs with no terminal, so it never asks" "$(<"$CALL_LOG")"
 [[ $output == *"BOOTLOADER: status"* ]] || fail "the Pi shows its bootloader status" "$output"
 ! grep -Eq '^(fwupdmgr|omarchy-pkg-add|omarchy-state) ' "$CALL_LOG" || fail "a Pi never reaches fwupd or asks for a reboot" "$(<"$CALL_LOG")"
 
-output=$(TEST_EEPROM_STATUS=1 run pi400 "$ROOT/bin/omarchy-update-firmware") || fail "a Pi with a bootloader update applies it"
+output=$(TEST_EEPROM_STATUS=1 run pi400 "$ROOT/bin/omarchy-update-firmware" <"$ROOT/version") || fail "a Pi with a bootloader update applies it"
 grep -Fxq 'sudo rpi-eeprom-update -a' "$CALL_LOG" || fail "an available update is staged with -a" "$(<"$CALL_LOG")"
 grep -Fxq 'omarchy-state set reboot-required' "$CALL_LOG" || fail "a staged update asks for a reboot"
 [[ $output == *"Restart the computer to apply it."* ]] || fail "the Pi is told a reboot applies the update" "$output"
