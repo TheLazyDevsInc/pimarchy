@@ -20,6 +20,29 @@ if [[ $OMARCHY_PATH != "/usr/share/omarchy" ]]; then
   fi
 fi
 
+# A Raspberry Pi installs omarchy from [pimarchy], which only changes when
+# omarchy update builds it from the Pi's root-owned Pimarchy checkout
+# (omarchy-update-rpi-pkgs), so checkupdates never sees a new one. Compare the
+# commit last built with the tip of the branch the checkout tracks, reading
+# both without writing to the checkout.
+if omarchy-hw-aarch64-rpi; then
+  pi_src=/var/lib/pimarchy/src
+  pi_git=(env GIT_NO_LAZY_FETCH=1 git -c safe.directory="$pi_src" -C "$pi_src")
+  pi_branch=$("${pi_git[@]}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [[ -n $pi_branch ]]; then
+    pi_remote=$(git config -f "$pi_src/.git/config" "branch.$pi_branch.remote" 2>/dev/null || true)
+    pi_merge=$(git config -f "$pi_src/.git/config" "branch.$pi_branch.merge" 2>/dev/null || true)
+    pi_url=$(git config -f "$pi_src/.git/config" "remote.$pi_remote.url" 2>/dev/null || true)
+    pi_built=$(cat /var/lib/pimarchy/repo/.built-commit 2>/dev/null || true)
+    if [[ -n $pi_url && $pi_merge == refs/heads/* && -n $pi_built ]]; then
+      pi_tip=$(GIT_TERMINAL_PROMPT=0 timeout 10 git ls-remote "$pi_url" "$pi_merge" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+      if [[ -n $pi_tip ]] && ! "${pi_git[@]}" merge-base --is-ancestor "$pi_tip" "$pi_built" 2>/dev/null; then
+        updates+=("pimarchy-checkout new commits on $pi_remote/${pi_merge#refs/heads/}")
+      fi
+    fi
+  fi
+fi
+
 package=""
 if pacman -Qq omarchy-dev >/dev/null 2>&1; then
   package=omarchy-dev

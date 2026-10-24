@@ -53,6 +53,12 @@ exit 0
 SH
 chmod +x "$stub_bin/pacman"
 
+cat >"$stub_bin/omarchy-hw-aarch64-rpi" <<'SH'
+#!/bin/bash
+exit 1
+SH
+chmod +x "$stub_bin/omarchy-hw-aarch64-rpi"
+
 cat >"$stub_bin/git" <<'SH'
 #!/bin/bash
 
@@ -211,3 +217,49 @@ grep -Fx 'omarchy-dev-checkout 1 new commit on origin/quattro' "$stdout" >/dev/n
   fail "update checker reports cached dev commits after a fetch failure" "$(cat "$stdout")"
 [[ ! -s $stderr ]] || fail "update checker keeps dev fetch failures quiet" "$(cat "$stderr")"
 pass "update checker uses cached dev state when fetching is unavailable"
+
+# A Raspberry Pi: omarchy comes from [pimarchy], built from the Pi's checkout,
+# so an update is the tracked branch moving past the commit last built. These
+# run against real git repositories, with the Pi's paths moved into the test.
+pimarchy="$test_tmp/pimarchy"
+pi_bin="$test_tmp/pi-bin"
+mkdir -p "$pi_bin" "$pimarchy/repo"
+sed "s|/var/lib/pimarchy|$pimarchy|g" "$ROOT/bin/omarchy-update-available" >"$pi_bin/omarchy-update-available"
+chmod +x "$pi_bin/omarchy-update-available"
+cp "$stub_bin/checkupdates" "$stub_bin/pacman" "$pi_bin/"
+printf '#!/bin/bash\nexit 0\n' >"$pi_bin/omarchy-hw-aarch64-rpi"
+chmod +x "$pi_bin/omarchy-hw-aarch64-rpi"
+
+pi_commit() {
+  git -C "$1" -c user.name=Test -c user.email=test@example.invalid commit -q --allow-empty -m "$2"
+}
+git init -q -b main "$test_tmp/origin"
+pi_commit "$test_tmp/origin" "First"
+git clone -q --filter=blob:none "file://$test_tmp/origin" "$pimarchy/src" 2>/dev/null
+git -C "$pimarchy/src" rev-parse HEAD >"$pimarchy/repo/.built-commit"
+
+run_pi_checker() {
+  OMARCHY_PATH=/usr/share/omarchy TEST_CHECKUPDATES=none TEST_INSTALLED_PACKAGE=omarchy \
+    PATH="$pi_bin:$PATH" "$pi_bin/omarchy-update-available" 2>"$stderr"
+}
+
+output=$(run_pi_checker) && fail "a Pi whose branch has not moved is up to date" "$output"
+[[ $output == "Omarchy is up to date" && ! -s $stderr ]] || fail "a Pi whose branch has not moved is up to date" "$output $(cat "$stderr")"
+pass "a Pi whose tracked branch has not moved past the last build is up to date"
+
+pi_commit "$test_tmp/origin" "Second"
+output=$(run_pi_checker) || fail "a Pi reports new commits on its tracked branch" "$output $(cat "$stderr")"
+[[ $output == "pimarchy-checkout new commits on origin/main" ]] || fail "a Pi reports new commits on its tracked branch" "$output"
+pass "a Pi reports new commits on the branch its checkout tracks"
+
+git -C "$pimarchy/src" pull -q --ff-only 2>/dev/null
+pi_commit "$pimarchy/src" "Local"
+git -C "$pimarchy/src" rev-parse HEAD >"$pimarchy/repo/.built-commit"
+output=$(run_pi_checker) && fail "a Pi built ahead of its tracked branch is up to date" "$output"
+[[ $output == "Omarchy is up to date" ]] || fail "a Pi built ahead of its tracked branch is up to date" "$output"
+pass "a Pi whose last build already contains the branch's tip is up to date"
+
+git -C "$pimarchy/src" remote set-url origin "file://$test_tmp/missing"
+output=$(run_pi_checker) && fail "a Pi that can't reach its origin reports nothing" "$output"
+[[ $output == "Omarchy is up to date" && ! -s $stderr ]] || fail "a Pi that can't reach its origin reports nothing" "$output $(cat "$stderr")"
+pass "a Pi that can't reach its checkout's origin quietly reports no update"
