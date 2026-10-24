@@ -699,6 +699,8 @@ extract_root() {
 
 # Readies the extracted root for the build: everything after this runs in it.
 prepare_root() {
+  local machine
+
   # The build binds this host's resolver config over /etc/resolv.conf, which in
   # the tarball is a symlink into /run; sealing points it at the stub resolver.
   rm -f -- "$root/etc/resolv.conf"
@@ -719,7 +721,9 @@ prepare_root() {
   install -d -m 0755 "$package_cache"
   prepare_guest_env
 
-  echo "Arch Linux ARM in the image: $(guest uname -sm)"
+  machine=$(guest uname -m) || fail "proot cannot run the image's programs"
+  [[ $machine == "aarch64" ]] || fail "the image's programs report a $machine CPU, not aarch64"
+  echo "The image's programs run, on an emulated or native aarch64 CPU"
 }
 
 # ── 5. Checkout ──────────────────────────────────────────────────────────────
