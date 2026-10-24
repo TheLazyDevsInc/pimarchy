@@ -194,12 +194,21 @@ pkgbuild_with_version() {
 
 echo -e "\e[32m\nUpdate Omarchy's Raspberry Pi packages\e[0m"
 
+# Whether the checkout's working tree differs from its HEAD, untracked files
+# included. A status that fails counts as a change: a tree in a state nobody
+# knows is never built.
+checkout_changed() {
+  local changes
+  changes=$(src_git status --porcelain --untracked-files=normal) || return 0
+  [[ -n $changes ]]
+}
+
 # The packages copy the checkout's working tree, untracked files included, so
 # a build of uncommitted changes would carry them under the name of a commit
 # that lacks them. Leave such a checkout alone, neither merged nor built, and
 # say how to go on: a hand-edited file holds up only this step, not the rest of
 # the update.
-if [[ -n $(src_git status --porcelain --untracked-files=normal) ]]; then
+if checkout_changed; then
   warn "The Pimarchy checkout at $src has uncommitted changes or untracked files, so it is neither updated nor built: the Pi keeps the packages it has."
   warn "Commit them to have them built, or set them aside to follow its upstream again: sudo git -C $src stash -u"
   exit 0
@@ -212,13 +221,28 @@ fi
 # a repository that went private or a stalled network can't hold the update.
 # It prunes, so a branch deleted from origin stops resolving as the upstream
 # below instead of leaving the Pi on its last remote-tracking ref for good.
+# The checkout is blobless, so the fetch brings only commits and trees, and the
+# fast-forward downloads the contents of the files they change. It runs the
+# same way, with a longer limit: new theme backgrounds alone can run to tens of
+# megabytes.
 before=$(src_git rev-parse --short HEAD)
 if ! as_root env GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$src" fetch --quiet --prune; then
   warn "Could not fetch the Pimarchy checkout at $src from its origin; building what is there."
 elif ! upstream=$(src_git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
   warn "The Pimarchy checkout at $src follows no branch of its origin, or that branch is gone from it; building what is there."
-elif ! src_git merge --ff-only --quiet "$upstream" 2>/dev/null; then
-  warn "The Pimarchy checkout at $src cannot fast-forward to $upstream; building what is there."
+elif ! as_root env GIT_TERMINAL_PROMPT=0 timeout 600 git -C "$src" merge --ff-only --quiet "$upstream"; then
+  # A fast-forward that fails downloading those contents has already deleted
+  # the files the new commits delete, though HEAD stays put. The tree was clean
+  # before it and HEAD's contents are all here, so put them back; a tree that
+  # can't be put back isn't built.
+  if ! checkout_changed; then
+    warn "The Pimarchy checkout at $src cannot fast-forward to $upstream; building what is there."
+  elif ! src_git reset --quiet --hard HEAD || checkout_changed; then
+    warn "A failed fast-forward to $upstream left changes in the Pimarchy checkout at $src that could not be undone, so it is not built: the Pi keeps the packages it has."
+    exit 0
+  else
+    warn "Could not fetch the contents of $upstream's new commits into the Pimarchy checkout at $src, so it stays at $before; building what is there."
+  fi
 elif [[ -n $(src_git rev-list --max-count=1 "$upstream..HEAD") ]]; then
   warn "The Pimarchy checkout at $src has local commits that $upstream lacks; building them."
 fi

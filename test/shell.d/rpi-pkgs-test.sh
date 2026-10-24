@@ -52,12 +52,18 @@ printf 'runuser %s\n' "$*" >>"$RPI_TEST_LOG"
 shift 3
 exec "$@"
 STUB
-# git is the real one, logged, and offline when a test says so.
+# git is the real one, logged, and offline when a test says so. A test can also
+# have the network drop right after a fetch, taking the origin it names away.
 cat >"$stubs/git" <<STUB
 #!/bin/bash
 printf 'git %s\n' "\$*" >>"\$RPI_TEST_LOG"
 if [[ \${RPI_TEST_OFFLINE:-0} == 1 && " \$* " == *" fetch "* ]]; then
   exit 128
+fi
+if [[ -n \${RPI_TEST_DROP_ORIGIN:-} && " \$* " == *" fetch "* ]]; then
+  "$real_git" "\$@" || exit
+  mv "\$RPI_TEST_DROP_ORIGIN" "\$RPI_TEST_DROP_ORIGIN.away"
+  exit 0
 fi
 exec "$real_git" "\$@"
 STUB
@@ -173,6 +179,7 @@ assert_root_steps_through_sudo() {
 origin=$test_tmp/origin.git
 seed=$test_tmp/seed
 "$real_git" -c init.defaultBranch=quattro init -q --bare "$origin"
+"$real_git" -C "$origin" config uploadpack.allowFilter true
 "$real_git" -c init.defaultBranch=quattro init -q "$seed"
 mkdir -p "$seed/pi/pkgbuilds/omarchy-rpi-boot"
 cp -a "$ROOT/pi/pkgbuilds/omarchy" "$ROOT/pi/pkgbuilds/omarchy-settings" "$seed/pi/pkgbuilds/"
@@ -266,7 +273,8 @@ if run; then fail "a Pi without a Pimarchy checkout has nothing to build from"; 
 grep -q "There is no Pimarchy checkout at $src" "$test_tmp/out" || fail "the missing checkout is named" "$(output)"
 pass "without a checkout to build from, it says so and fails"
 
-"$real_git" clone -q "$origin" "$src"
+# Blobless, like the Pi's: file contents come from origin as git needs them.
+"$real_git" clone -q --filter=blob:none "file://$origin" "$src"
 
 run || fail "the first build succeeds" "$(output)"
 expect_versions
@@ -322,7 +330,8 @@ push_commit "Third"
 run || fail "a moved checkout rebuilds" "$(output)"
 [[ $("$real_git" -C "$src" rev-parse HEAD) == "$("$real_git" -C "$origin" rev-parse quattro)" ]] ||
   fail "the checkout fast-forwards to its upstream"
-grep -qx "sudo git -C $src merge --ff-only --quiet origin/quattro" "$log" || fail "the checkout merges fast-forward only" "$(output)"
+grep -qE "^sudo env GIT_TERMINAL_PROMPT=0 timeout [0-9]+ git -C $src merge --ff-only --quiet origin/quattro$" "$log" ||
+  fail "the checkout merges fast-forward only, like the fetch without a credential prompt and within a time limit" "$(output)"
 expect_versions
 [[ $omarchy_version == "$base_version.r3."* ]] || fail "the serial is the commit count when that is past the last build's" "$omarchy_version"
 [[ $(makepkg_runs) == "omarchy-settings-$omarchy_version omarchy-$omarchy_version omarchy-rpi-boot-$boot_version " ]] ||
@@ -357,6 +366,29 @@ run || fail "the next run after a failure builds" "$(output)"
 expect_versions
 [[ $(db_entries) == "$expected_packages" ]] || fail "the next run publishes the commit that failed before" "$(db_entries)"
 pass "the next run builds what failed before"
+
+# The fetch brings the blobless checkout the new commits and their trees, and
+# the fast-forward the contents of the files they change. The network drops in
+# between, once the fast-forward has deleted what upstream deleted.
+echo "doomed" >"$seed/DOOMED"
+"$real_git" -C "$seed" add DOOMED
+push_commit "Add DOOMED"
+run || fail "a commit adding a file builds" "$(output)"
+"$real_git" -C "$seed" rm -q DOOMED
+push_commit "Drop DOOMED"
+built_head=$("$real_git" -C "$src" rev-parse HEAD)
+before=$(repo_state)
+if ! RPI_TEST_DROP_ORIGIN=$origin run; then fail "a fast-forward that cannot fetch lets the update go on" "$(output)"; fi
+mv "$origin.away" "$origin"
+grep -q "$("$real_git" -C "$origin" rev-parse quattro:CHANGES)" "$test_tmp/out" || fail "git's own error, naming the contents it could not fetch, is shown" "$(output)"
+grep -q "Could not fetch the contents of origin/quattro's new commits" "$test_tmp/out" || fail "the warning says what could not be fetched" "$(output)"
+[[ $("$real_git" -C "$src" rev-parse HEAD) == "$built_head" && -f $src/DOOMED && -z $("$real_git" -C "$src" status --porcelain) ]] ||
+  fail "the checkout is put back at the commit it was at" "$("$real_git" -C "$src" status 2>&1)"
+[[ -z $(makepkg_runs) && $(repo_state) == "$before" ]] || fail "the commit already built is not rebuilt" "$(output)"
+run || fail "the next run fast-forwards" "$(output)"
+expect_versions
+[[ ! -e $src/DOOMED && $(db_entries) == "$expected_packages" ]] || fail "the next run fast-forwards and builds" "$(output)"
+pass "a fast-forward that cannot fetch the new contents puts the checkout back and says so, and the next run goes on"
 
 # ── local work in the checkout ───────────────────────────────────────────────
 
