@@ -1,0 +1,158 @@
+#!/usr/bin/ash
+# shellcheck shell=ash
+
+# Gives a flashed Pimarchy image's disk an MBR identifier of its own on its
+# first boot. omarchy-rpi-boot installs it as the omarchy-rpi-disk-id initramfs
+# hook, which its mkinitcpio drop-in puts before filesystems.
+#
+# Every card flashed from one image starts with the image's disk identifier,
+# and so with the same PARTUUIDs (<id>-01, <id>-02), which cmdline.txt and fstab
+# name. With two such disks attached, a boot could mount either. So the image
+# boots the first time by its root filesystem's UUID, which no identifier change
+# touches, with pimarchy.new_disk_id on the kernel command line, and:
+#
+# - before the root is mounted, this writes a random identifier into the MBR,
+#   has the kernel read the partition table again, and mounts the root by its
+#   device for this boot, before udev or systemd in the root see the disk;
+# - once the root is mounted, it points fstab's / and /boot at the new
+#   PARTUUIDs, then commits: cmdline.txt names the root by its new PARTUUID and
+#   drops the flag, written to a temporary file and renamed over the original.
+#
+# Until that rename, cmdline.txt still names the root's UUID and the flag, so a
+# power cut anywhere before it means the next boot does it all again, with
+# another identifier. A failed step leaves the flag, says why, and lets the boot
+# go on: the identifier only matters with two disks from one image attached.
+#
+# The functions take their paths as arguments, so test/shell.d/rpi-boot-test.sh
+# runs them on a disk image file.
+
+# The identifier of MBR disk $1, as sfdisk prints it (label-id): the four
+# little-endian bytes at offset 440.
+omarchy_rpi_disk_id() {
+    dd if="$1" bs=1 skip=440 count=4 2>/dev/null | hexdump -v -e '/1 "%02x"' |
+        sed 's/^\(..\)\(..\)\(..\)\(..\)$/\4\3\2\1/'
+}
+
+# Writes identifier $2 (eight hex digits, as sfdisk prints it) into MBR disk $1.
+omarchy_rpi_set_disk_id() {
+    local bytes
+
+    bytes=$(printf '%s\n' "$2" | sed 's/^\(..\)\(..\)\(..\)\(..\)$/\\x\4\\x\3\\x\2\\x\1/')
+    # shellcheck disable=SC2059
+    printf "$bytes" | dd of="$1" bs=1 seek=440 count=4 conv=notrunc 2>/dev/null && sync
+}
+
+# A random identifier other than 00000000 and $1.
+omarchy_rpi_random_id() {
+    local id
+
+    while :; do
+        id=$(dd if=/dev/urandom bs=4 count=1 2>/dev/null | hexdump -v -e '/1 "%02x"')
+        case $id in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+                if [ "$id" != "00000000" ] && [ "$id" != "$1" ]; then
+                    printf '%s\n' "$id"
+                    return 0
+                fi
+                ;;
+        esac
+    done
+}
+
+# Points the PARTUUIDs of fstab $1's / and /boot lines at identifier $2. Other
+# lines stay as they are.
+omarchy_rpi_fstab() {
+    [ -f "$1" ] || return 0
+    sed -E "s#^([[:space:]]*)PARTUUID=[0-9a-fA-F]{8}-0([12])([[:space:]]+/(boot)?[[:space:]])#\1PARTUUID=$2-0\2\3#" "$1" >"$1.omarchy-new" &&
+        sync && mv -f "$1.omarchy-new" "$1" && sync
+}
+
+# Commits the new identifier to cmdline.txt $1: root= names partition 2 by its
+# PARTUUID under identifier $2, and pimarchy.new_disk_id goes. Every other token
+# stays, on the one line the firmware reads.
+omarchy_rpi_cmdline() {
+    local line="" token out=""
+
+    IFS= read -r line <"$1" || [ -n "$line" ] || return 1
+    line=${line%"$(printf '\r')"}
+    set -f
+    for token in $line; do
+        case $token in
+            root=*) token=root=PARTUUID=$2-02 ;;
+            pimarchy.new_disk_id) continue ;;
+        esac
+        out="${out:+$out }$token"
+    done
+    set +f
+    printf '%s\n' "$out" >"$1.omarchy-new" && sync && mv -f "$1.omarchy-new" "$1" && sync
+}
+
+run_hook() {
+    local device name disk boot entry old new
+
+    case " $(cat /proc/cmdline) " in
+        *" pimarchy.new_disk_id "*) ;;
+        *) return 0 ;;
+    esac
+
+    if ! device=$(resolve_device "$root"); then
+        err "omarchy-rpi-disk-id: cannot find the root ($root), so the disk keeps its identifier"
+        return 0
+    fi
+    name=${device##*/}
+    if [ "$(cat "/sys/class/block/$name/partition" 2>/dev/null)" != "2" ]; then
+        err "omarchy-rpi-disk-id: $device is not partition 2 of a disk, so the disk keeps its identifier"
+        return 0
+    fi
+    disk=$(readlink -f "/sys/class/block/$name/..")
+    disk=/dev/${disk##*/}
+    if [ "$(dd if="$disk" bs=1 skip=510 count=2 2>/dev/null | hexdump -v -e '/1 "%02x"')" != "55aa" ]; then
+        err "omarchy-rpi-disk-id: $disk has no MBR partition table, so it keeps its identifier"
+        return 0
+    fi
+    boot=""
+    for entry in /sys/class/block/"${disk##*/}"/*/partition; do
+        if [ "$(cat "$entry" 2>/dev/null)" = "1" ]; then
+            entry=${entry%/partition}
+            boot=/dev/${entry##*/}
+        fi
+    done
+    if [ -z "$boot" ]; then
+        err "omarchy-rpi-disk-id: $disk has no partition 1 holding cmdline.txt, so it keeps its identifier"
+        return 0
+    fi
+
+    old=$(omarchy_rpi_disk_id "$disk")
+    new=$(omarchy_rpi_random_id "$old")
+    if ! omarchy_rpi_set_disk_id "$disk" "$new"; then
+        err "omarchy-rpi-disk-id: cannot write a new identifier to $disk; the next boot tries again"
+        return 0
+    fi
+    partprobe "$disk" >/dev/null 2>&1 || true
+    msg ":: gave $disk the identifier $new (it was $old)"
+
+    # The PARTUUIDs this boot's tags would resolve to have just changed.
+    root=$device
+    omarchy_rpi_new_id=$new
+    omarchy_rpi_boot=$boot
+}
+
+run_latehook() {
+    local mountpoint=/run/omarchy-rpi-disk-id
+
+    [ -n "${omarchy_rpi_new_id:-}" ] || return 0
+
+    if ! omarchy_rpi_fstab /new_root/etc/fstab "$omarchy_rpi_new_id"; then
+        err "omarchy-rpi-disk-id: cannot update /etc/fstab; the next boot tries again"
+        return 0
+    fi
+    mkdir -p "$mountpoint"
+    if ! mount -t vfat -o rw,iocharset=ascii "$omarchy_rpi_boot" "$mountpoint"; then
+        err "omarchy-rpi-disk-id: cannot mount $omarchy_rpi_boot; the next boot tries again"
+        return 0
+    fi
+    if ! omarchy_rpi_cmdline "$mountpoint/cmdline.txt" "$omarchy_rpi_new_id"; then
+        err "omarchy-rpi-disk-id: cannot update cmdline.txt; the next boot tries again"
+    fi
+    umount "$mountpoint"
+}

@@ -674,6 +674,58 @@ done
 grep -qF 'install -Dm755 "$entrypoint" "$pkgdir/usr/lib/omarchy/rpi-boot/$entrypoint"' "$pkgbuild" &&
   grep -qF 'omarchy-rpi-grow-root.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-grow-root.service"' "$pkgbuild" ||
   fail "the package installs its entrypoints and unit where the dispatcher and systemd look"
-[[ $(ls "$scripts") == $'grow-root\nomarchy-rpi-grow-root.service\nsetup-boot\nupdate-verify' ]] ||
+grep -qF 'initcpio-hook "$pkgdir/usr/lib/initcpio/hooks/omarchy-rpi-disk-id"' "$pkgbuild" &&
+  grep -qF 'initcpio-install "$pkgdir/usr/lib/initcpio/install/omarchy-rpi-disk-id"' "$pkgbuild" &&
+  grep -qF 'mkinitcpio.conf "$pkgdir/etc/mkinitcpio.conf.d/90-omarchy-rpi-disk-id.conf"' "$pkgbuild" ||
+  fail "the package installs the disk identifier hook where mkinitcpio looks"
+[[ $(ls "$scripts") == $'grow-root\ninitcpio-hook\ninitcpio-install\nmkinitcpio.conf\nomarchy-rpi-grow-root.service\nsetup-boot\nupdate-verify' ]] ||
   fail "the package installs every file in pi/rpi-boot" "$(ls "$scripts")"
-pass "omarchy-rpi-boot installs every Pi boot script and the grow-root unit"
+pass "omarchy-rpi-boot installs every Pi boot script, the grow-root unit and the disk identifier hook"
+
+# ── The first-boot disk identifier ───────────────────────────────────────────
+
+# The initramfs hook's functions, on a disk image file. Its busybox has
+# hexdump; this host may not, so a stand-in gives the one form the hook uses.
+if ! command -v sfdisk >/dev/null; then
+  skip "the disk identifier hook (it needs sfdisk)"
+else
+  idbin=$tmp/disk-id-bin
+  mkdir -p "$idbin"
+  if ! command -v hexdump >/dev/null; then
+    printf '%s\n' '#!/bin/bash' '[[ $* == "-v -e /1 \"%02x\"" ]] || exit 2' 'od -An -v -tx1 | tr -d " \n"' >"$idbin/hexdump"
+    chmod +x "$idbin/hexdump"
+  fi
+  disk=$tmp/disk.img
+  truncate -s 16M "$disk"
+  printf 'label: dos\nlabel-id: 0x8a70c72b\nstart=2048, size=8192, type=c\nstart=10240, type=83\n' |
+    sfdisk --quiet --no-reread --no-tell-kernel "$disk" >/dev/null
+  before=$(sfdisk --dump "$disk" | grep -v '^label-id:')
+  output=$(PATH="$idbin:$PATH" bash -c '
+    source "$1"
+    old=$(omarchy_rpi_disk_id "$2")
+    new=$(omarchy_rpi_random_id "$old")
+    omarchy_rpi_set_disk_id "$2" "$new"
+    echo "$old $new $(omarchy_rpi_disk_id "$2")"
+  ' bash "$scripts/initcpio-hook" "$disk") || fail "the hook gives a disk a new identifier" "$output"
+  read -r old new read_back <<<"$output"
+  [[ $old == "8a70c72b" && $new =~ ^[0-9a-f]{8}$ && $new != "$old" && $new != "00000000" && $read_back == "$new" ]] ||
+    fail "the hook reads and writes the identifier as sfdisk names it" "$output"
+  [[ $(sfdisk --dump "$disk" | sed -n 's/^label-id: //p') == "0x$new" && $(sfdisk --dump "$disk" | grep -v '^label-id:') == "$before" ]] ||
+    fail "the new identifier is the disk's label-id, and the partitions stay" "$(sfdisk --dump "$disk")"
+  pass "the hook gives an MBR disk a random identifier of its own and leaves its partitions alone"
+
+  # Then fstab's / and /boot, and cmdline.txt's root=, follow the new
+  # identifier; nothing else on either changes.
+  printf '%s\n' '# fstab' \
+    'PARTUUID=8a70c72b-02  /      ext4  rw,relatime  0 1' \
+    'PARTUUID=8a70c72b-01  /boot  vfat  rw,relatime  0 2' \
+    'PARTUUID=0badc0de-01  /mnt/usb  vfat  rw  0 2' >"$tmp/fstab"
+  printf 'root=UUID=93f96c19-8612-4030-98f1-3533322a5222 rw rootwait console=tty1 quiet splash pimarchy.new_disk_id\r\n' >"$tmp/cmdline.txt"
+  output=$(bash -c 'source "$1"; omarchy_rpi_fstab "$2/fstab" 1234abcd && omarchy_rpi_cmdline "$2/cmdline.txt" 1234abcd' \
+    bash "$scripts/initcpio-hook" "$tmp" 2>&1) || fail "the hook points fstab and cmdline.txt at the new identifier" "$output"
+  [[ $(<"$tmp/fstab") == $'# fstab\nPARTUUID=1234abcd-02  /      ext4  rw,relatime  0 1\nPARTUUID=1234abcd-01  /boot  vfat  rw,relatime  0 2\nPARTUUID=0badc0de-01  /mnt/usb  vfat  rw  0 2' ]] ||
+    fail "fstab's / and /boot follow the new identifier, and other disks' lines stay" "$(<"$tmp/fstab")"
+  [[ $(<"$tmp/cmdline.txt") == "root=PARTUUID=1234abcd-02 rw rootwait console=tty1 quiet splash" && ! -e $tmp/cmdline.txt.omarchy-new ]] ||
+    fail "cmdline.txt names the root by its new PARTUUID and drops the first-boot flag" "$(<"$tmp/cmdline.txt")"
+  pass "fstab's / and /boot and cmdline.txt's root follow the new identifier, and the first-boot flag goes"
+fi

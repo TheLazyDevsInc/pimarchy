@@ -53,5 +53,9 @@ package() {
     install -Dm755 "$entrypoint" "$pkgdir/usr/lib/omarchy/rpi-boot/$entrypoint"
   done
   install -Dm644 omarchy-rpi-grow-root.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-grow-root.service"
+  # The first-boot disk identifier hook, and the drop-in that puts it in HOOKS.
+  install -Dm644 initcpio-hook "$pkgdir/usr/lib/initcpio/hooks/omarchy-rpi-disk-id"
+  install -Dm644 initcpio-install "$pkgdir/usr/lib/initcpio/install/omarchy-rpi-disk-id"
+  install -Dm644 mkinitcpio.conf "$pkgdir/etc/mkinitcpio.conf.d/90-omarchy-rpi-disk-id.conf"
   install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

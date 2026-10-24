@@ -132,6 +132,15 @@ assert_hooks "a Raspberry Pi starts from its own baseline, without Limine's over
 assert_hooks "x86 starts from the Omarchy baseline" x86 "$omarchy_hooks"
 assert_hooks "without the detector the Omarchy baseline stays" no-detector "$omarchy_hooks"
 
+# The Pi's boot package adds its first-boot disk identifier hook just before
+# filesystems, once, whatever baseline the files before it set.
+drop_in 90-omarchy-rpi-disk-id.conf <"$ROOT/pi/rpi-boot/mkinitcpio.conf"
+assert_hooks "the Pi boot package puts its disk identifier hook before filesystems" aarch64-rpi \
+  "${rpi_hooks/ filesystems/ omarchy-rpi-disk-id filesystems}"
+drop_in 99-again.conf <"$ROOT/pi/rpi-boot/mkinitcpio.conf"
+assert_hooks "the Pi boot package's hook is in HOOKS once" aarch64-rpi "${rpi_hooks/ filesystems/ omarchy-rpi-disk-id filesystems}"
+new_etc
+
 if composed=$(compose contradiction 2>"$test_tmp/contradiction.err"); then
   fail "a platform the detector cannot place stops the build" "composed: $composed"
 fi
