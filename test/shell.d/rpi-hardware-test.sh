@@ -142,3 +142,9 @@ rm "$monitors"
 run_gdk pi400 || fail "a user without monitors.lua is left alone"
 [[ ! -e $monitors ]] || fail "the leaf creates no monitors.lua"
 pass "a Pi's user gets GDK scale 1 only over the shipped value"
+
+# A config reinstall replays /etc/skel, whose monitors.lua has GDK scale 2, so
+# it has to put the Pi's scale back the way user setup set it.
+grep -Fxq 'source "$OMARCHY_PATH/install/user/hardware/rpi/gdk-scale.sh"' "$ROOT/bin/omarchy-reinstall-configs" ||
+  fail "a config reinstall re-applies a Pi's GDK scale"
+pass "a config reinstall re-applies a Pi's GDK scale"

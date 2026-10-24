@@ -30,3 +30,6 @@ fi
 # /etc/skel holds the shared defaults, so put the Snapdragon video decoding
 # settings back.
 omarchy-install-video-decode
+
+# /etc/skel ships GDK scale 2 for HiDPI laptops; put a Pi's 1x HDMI scale back.
+source "$OMARCHY_PATH/install/user/hardware/rpi/gdk-scale.sh"
