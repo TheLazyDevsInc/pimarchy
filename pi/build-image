@@ -1942,7 +1942,11 @@ main() {
   echo "  sha256 $(cut -d' ' -f1 <"$image_file.sha256")"
   echo "  commit $commit ($branch), $channel channel"
   echo "  boot PARTUUID $disk_id-01, root PARTUUID $disk_id-02, root filesystem UUID $root_fs_uuid"
-  echo "Flash it with: xzcat $image_file | dd of=/dev/sdX bs=4M conv=fsync status=progress (see pi/README.md)"
+  if (( compress )); then
+    echo "Flash it with: xzcat $image_file | dd of=/dev/sdX bs=4M conv=fsync status=progress (see pi/README.md)"
+  else
+    echo "Flash it with: dd if=$image_file of=/dev/sdX bs=4M conv=fsync status=progress (see pi/README.md)"
+  fi
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
