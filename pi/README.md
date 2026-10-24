@@ -129,10 +129,10 @@ fdtput -t s bcm2711-rpi-400.dtb /aliases serial1 /soc/serial@7e215040
 qemu-system-aarch64 -M raspi4b -nographic -serial mon:stdio \
   -kernel kernel8.img -dtb bcm2711-rpi-400.dtb -initrd initramfs-linux.img \
   -drive file=test.img,if=sd,format=raw \
-  -append "root=PARTUUID=$(sfdisk --dump test.img | sed -n 's/^label-id: 0x//p')-02 rw rootwait console=ttyAMA0,115200 systemd.debug_shell=ttyAMA0 systemd.mask=serial-getty@ttyAMA0.service"
+  -append "$(mtype -i test.img@@1M ::cmdline.txt | tr -d '\r\n') console=ttyAMA0,115200 loglevel=6 systemd.show_status=true systemd.debug_shell=ttyAMA0 systemd.mask=serial-getty@ttyAMA0.service"
 ```
 
-The first boot takes about fifteen minutes under emulation on an x86_64 host. `journalctl -u omarchy-rpi-grow-root -u omarchy-provision-hardware` in the debug shell shows what it did, and `omarchy-lifecycle-dispatch update-verify` checks the boot files. `systemctl poweroff` halts the board, since QEMU can't cut its power; quit QEMU with Ctrl-A X once it has. To boot the result again, copy the initramfs the first boot rebuilt out of the image (`mcopy -o -i test.img@@1M ::initramfs-linux.img .`) first.
+The command line is the image's own `cmdline.txt`, which the firmware would pass, with a serial console and boot messages added after it, so the first boot gives the card its own disk identifier as on a Pi. The first boot takes about fifteen minutes under emulation on an x86_64 host. `journalctl -u omarchy-rpi-grow-root -u omarchy-provision-hardware` in the debug shell shows what it did, and `omarchy-lifecycle-dispatch update-verify` checks the boot files. `systemctl poweroff` halts the board, since QEMU can't cut its power; quit QEMU with Ctrl-A X once it has. To boot the result again, copy the initramfs the first boot rebuilt out of the image (`mcopy -o -i test.img@@1M ::initramfs-linux.img .`) first; the same command reads the `cmdline.txt` the first boot rewrote.
 
 ## Flashing
 
@@ -149,10 +149,11 @@ Raspberry Pi Imager works too: choose "Use custom" under the operating system an
 
 Connect a monitor to the micro-HDMI port next to the power socket, then power on. The first boot takes a few minutes; don't cut the power while it runs. It needs no network:
 
-1. The root partition and its filesystem grow to fill the card.
-2. The queued hardware setup runs on the Pi: it creates the Pi's own pacman keyring, sets up its audio, sleep, network, Vulkan and boot files, and rebuilds the initramfs for its hardware.
-3. The setup screen on the first console asks for your keyboard layout, your account and password, the computer's name, and the timezone.
-4. It logs you into Hyprland once. From the next boot on, the login screen asks for your password.
+1. Before anything else sees the card, the initramfs gives it a disk identifier of its own, so cards flashed from the same image never share their partition IDs.
+2. The root partition and its filesystem grow to fill the card.
+3. The queued hardware setup runs on the Pi: it creates the Pi's own pacman keyring, sets up its audio, sleep, network, Vulkan and boot files, and rebuilds the initramfs for its hardware.
+4. The setup screen on the first console asks for your keyboard layout, your account and password, the computer's name, and the timezone.
+5. It logs you into Hyprland once. From the next boot on, the login screen asks for your password.
 
 The Pi has no battery-backed clock, so until it reaches the network its clock starts from the time the image was built. Wi-Fi is set up from Omarchy's network menu. SSH stays off, as on any Omarchy install. To turn it on, run `sudo systemctl enable --now sshd` and `sudo ufw allow ssh`.
 
