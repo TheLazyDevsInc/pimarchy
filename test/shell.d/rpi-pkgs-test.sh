@@ -203,14 +203,20 @@ base_version=$(sed -n 's/^pkgver=//p' "$ROOT/pi/pkgbuilds/omarchy/PKGBUILD")
 [[ $base_version == "$(sed -n 's/^pkgver=//p' "$ROOT/pi/pkgbuilds/omarchy-settings/PKGBUILD")" ]] ||
   fail "the vendored omarchy and omarchy-settings carry the same pkgver"
 
-# The versions a build of the checkout's HEAD carries.
+# The versions a build of the checkout's HEAD carries under serial $1, by
+# default the checkout's commit count.
 expect_versions() {
-  local count short
-  count=$("$real_git" -C "$src" rev-list --count HEAD)
+  local serial=${1:-} short
+  [[ -n $serial ]] || serial=$("$real_git" -C "$src" rev-list --count HEAD)
   short=$("$real_git" -C "$src" rev-parse --short HEAD)
-  omarchy_version=$base_version.r$count.g$short
-  boot_version=1.r$count.g$short
+  omarchy_version=$base_version.r$serial.g$short
+  boot_version=1.r$serial.g$short
   expected_packages="omarchy-$omarchy_version-1 omarchy-rpi-boot-$boot_version-1 omarchy-settings-$omarchy_version-1 "
+}
+
+# The serial the published builds carry.
+published_serial() {
+  tar -tzf "$repo/pimarchy.db" | sed -n 's|^\./omarchy-rpi-boot-1\.r\([0-9]*\)\.g[^/]*/$|\1|p'
 }
 
 # ── off the Pi ───────────────────────────────────────────────────────────────
@@ -303,24 +309,17 @@ grep -q "up to date" "$test_tmp/out" || fail "an up-to-date run says so" "$(outp
 [[ $(repo_state) == "$before" ]] || fail "an up-to-date run leaves the repository alone"
 pass "a checkout that hasn't moved is not rebuilt"
 
-rm "$repo/omarchy-$omarchy_version-1-aarch64.pkg.tar.zst"
-run || fail "a run with a package missing succeeds" "$(output)"
-[[ $(makepkg_runs) == "omarchy-settings-$omarchy_version omarchy-$omarchy_version omarchy-rpi-boot-$boot_version " ]] ||
-  fail "a package missing from the repository rebuilds them" "$(output)"
-[[ -f $repo/omarchy-$omarchy_version-1-aarch64.pkg.tar.zst && $(db_entries) == "$expected_packages" ]] ||
-  fail "the rebuild publishes the missing package again" "$(ls -la "$repo")"
-pass "a package gone from the repository is rebuilt even when the commit is unchanged"
-
 # ── a moved checkout ─────────────────────────────────────────────────────────
 
 old_packages=$expected_packages
 push_commit "Second"
+push_commit "Third"
 run || fail "a moved checkout rebuilds" "$(output)"
 [[ $("$real_git" -C "$src" rev-parse HEAD) == "$("$real_git" -C "$origin" rev-parse quattro)" ]] ||
   fail "the checkout fast-forwards to its upstream"
 grep -qx "sudo git -C $src merge --ff-only --quiet origin/quattro" "$log" || fail "the checkout merges fast-forward only" "$(output)"
 expect_versions
-[[ $omarchy_version == "$base_version.r2."* ]] || fail "the commit count moves with the checkout" "$omarchy_version"
+[[ $omarchy_version == "$base_version.r3."* ]] || fail "the serial is the commit count when that is past the last build's" "$omarchy_version"
 [[ $(makepkg_runs) == "omarchy-settings-$omarchy_version omarchy-$omarchy_version omarchy-rpi-boot-$boot_version " ]] ||
   fail "the moved checkout's packages build" "$(output)"
 [[ $(db_entries) == "$expected_packages" ]] || fail "the database moves to the new builds" "$(db_entries)"
@@ -332,7 +331,7 @@ pass "a moved checkout fast-forwards, rebuilds and replaces the previous builds"
 
 # ── failures leave the repository alone ──────────────────────────────────────
 
-push_commit "Third"
+push_commit "Fourth"
 before=$(repo_state)
 if RPI_TEST_FAIL_PKG=omarchy run; then fail "a failed build fails the run"; fi
 grep -q "Building omarchy failed" "$test_tmp/out" || fail "the failed package is named" "$(output)"
@@ -361,7 +360,7 @@ echo "local commit" >"$src/LOCAL"
 "$real_git" -C "$src" commit -qm "Local"
 local_commit=$("$real_git" -C "$src" rev-parse HEAD)
 echo "local edit" >>"$src/LOCAL"
-push_commit "Fourth"
+push_commit "Fifth"
 before=$(repo_state)
 run || fail "a checkout with uncommitted changes lets the update go on" "$(output)"
 grep -q "has uncommitted changes, so it is neither updated nor built" "$test_tmp/out" || fail "uncommitted changes are reported" "$(output)"
@@ -404,9 +403,43 @@ grep -q "follows no branch of its origin, or that branch is gone from it" "$test
 "$real_git" -C "$src" branch -q -D gone
 pass "a branch deleted from origin is pruned and reported, not followed at its last known commit"
 
+# ── versions never go backwards ──────────────────────────────────────────────
+
+# Upstream is rewritten with fewer commits than the last build's serial, and the
+# checkout reset onto it.
+last_serial=$(published_serial)
+"$real_git" -C "$seed" reset -q --hard "$("$real_git" -C "$seed" rev-list --max-parents=0 HEAD)"
+echo "Rebased" >"$seed/CHANGES"
+"$real_git" -C "$seed" add CHANGES
+"$real_git" -C "$seed" commit -qm "Rebased"
+"$real_git" -C "$seed" push -q --force origin quattro
+"$real_git" -C "$src" fetch -q
+"$real_git" -C "$src" reset -q --hard origin/quattro
+(( $("$real_git" -C "$src" rev-list --count HEAD) < last_serial )) || fail "the rewritten history is shorter than the last serial"
+run || fail "a checkout reset onto a shorter history builds" "$(output)"
+expect_versions $(( last_serial + 1 ))
+[[ $(makepkg_runs) == "omarchy-settings-$omarchy_version omarchy-$omarchy_version omarchy-rpi-boot-$boot_version " &&
+  $(db_entries) == "$expected_packages" ]] || fail "a shorter history builds under the serial after the last one" "$(output)"
+pass "a checkout reset onto fewer commits still builds versions that sort above the last ones"
+
+# The same commit rebuilt, since one of its packages is gone.
+last_serial=$(published_serial)
+old_packages=$expected_packages
+rm "$repo/omarchy-$omarchy_version-1-aarch64.pkg.tar.zst"
+run || fail "a run with a package missing succeeds" "$(output)"
+expect_versions $(( last_serial + 1 ))
+[[ $(makepkg_runs) == "omarchy-settings-$omarchy_version omarchy-$omarchy_version omarchy-rpi-boot-$boot_version " ]] ||
+  fail "a package missing from the repository rebuilds them, under the next serial" "$(output)"
+[[ $(db_entries) == "$expected_packages" ]] || fail "the rebuild is published" "$(db_entries)"
+for package in $old_packages; do
+  [[ ! -e $repo/$package-aarch64.pkg.tar.zst ]] || fail "the rebuild replaces $package rather than keeping its name" "$(ls -la "$repo")"
+done
+pass "a package gone from the repository is rebuilt even when the commit is unchanged, under names no published file has had"
+
 # ── who builds ───────────────────────────────────────────────────────────────
 
 rm "$repo/.built-commit"
+expect_versions $(( $(published_serial) + 1 ))
 run --as-user nobody || fail "a build as another user succeeds" "$(output)"
 for step in mktemp cp tee env rm; do
   grep -q "^sudo runuser -u nobody -- $step " "$log" || fail "--as-user runs $step as that user" "$(output)"

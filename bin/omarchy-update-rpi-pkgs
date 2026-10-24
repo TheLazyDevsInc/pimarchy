@@ -229,22 +229,22 @@ else
 fi
 
 # Every package is versioned by the checkout it was built from, the way Arch
-# versions VCS packages, so each build upgrades the last one.
-declare -A version
+# versions VCS packages: <PKGBUILD pkgver>.r<serial>.g<short sha>.
+declare -A base version
 for pkg in "${packages[@]}"; do
-  base=$(pkgbuild_pkgver "$src/pi/pkgbuilds/$pkg/PKGBUILD") ||
+  base[$pkg]=$(pkgbuild_pkgver "$src/pi/pkgbuilds/$pkg/PKGBUILD") ||
     die "$src/pi/pkgbuilds/$pkg/PKGBUILD sets no plain pkgver to build $pkg from."
-  version[$pkg]=$base.r$count.g$short
 done
 # omarchy depends on omarchy-settings of exactly its own version.
-[[ ${version[omarchy]} == "${version[omarchy-settings]}" ]] ||
+[[ ${base[omarchy]} == "${base[omarchy-settings]}" ]] ||
   die "omarchy and omarchy-settings set different pkgver values in $src/pi/pkgbuilds; they must match."
 
+# Each package has a build of HEAD in the repository, whatever its serial.
 published() {
   local pkg
   local -a files
   for pkg in "${packages[@]}"; do
-    files=("$repo/$pkg-${version[$pkg]}"-*.pkg.tar.*)
+    files=("$repo/$pkg-${base[$pkg]}".r[0-9]*.g"$short"-*.pkg.tar.*)
     [[ -f ${files[0]} ]] || return 1
   done
 }
@@ -257,6 +257,22 @@ if [[ $built == "$head" ]] && published; then
   echo "Omarchy's Raspberry Pi packages are up to date."
   exit 0
 fi
+
+# The serial is the checkout's commit count, but always past every serial the
+# repository holds: a reset or rebase can leave fewer commits, and pacman never
+# installs a build that sorts below the one it has. Past the highest, a rebuild
+# of the same commit gets file names of its own too, so nothing published is
+# ever rewritten under a name pacman may already have cached.
+serial=$count
+serial_pattern='\.r([0-9]+)\.g[0-9a-f]+-[^-]+-[^-]+\.pkg\.tar\.'
+for file in "$repo"/*.pkg.tar.*; do
+  if [[ ${file##*/} =~ $serial_pattern ]] && (( 10#${BASH_REMATCH[1]} >= serial )); then
+    serial=$(( 10#${BASH_REMATCH[1]} + 1 ))
+  fi
+done
+for pkg in "${packages[@]}"; do
+  version[$pkg]=${base[$pkg]}.r$serial.g$short
+done
 
 work=""
 cleanup() {
