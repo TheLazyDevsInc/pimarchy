@@ -62,3 +62,9 @@ A Raspberry Pi 400 (BCM2711, Cortex-A72 ARMv8.0-A, 4 GB, VideoCore VI with vc4 K
 - `./test/cli` and the shell suite as an unprivileged user, never as root.
 - `pi/build-image` run end to end in this repository's development container under emulation, then the image's partition table, boot files, `cmdline.txt` root, fstab, the image-target manifest, the deferred-step queue, the local repository and the armed provisioning inspected.
 - On a Pi 400: flash, boot, complete the owner form, reach Hyprland with the Quickshell bar, run `omarchy update` (the local packages rebuild, `update-verify` passes), and check Wi-Fi, Bluetooth, HDMI audio on both outputs, a theme switch, a screenshot and a screen recording. Hardware verification is outstanding until someone runs it.
+
+## Open follow-ups
+
+- **A disk identifier per card.** Cards flashed from one image share their MBR disk identifier and so their PARTUUIDs. Giving each card its own needs an initramfs hook that changes the identifier and rewrites `cmdline.txt` and `fstab` before udev and systemd see the disk; doing it later from a service races systemd's generated mounts ([`docs/raspberry-pi.md`](../docs/raspberry-pi.md), Boot chain).
+- **The keyboard layout.** Raspberry Pi OS preselects the Pi 400's keyboard layout from the keyboard's country code, which the firmware passes in the device tree; the owner wizard could do the same instead of asking.
+- **Hardware verification.** The checklist in [`docs/raspberry-pi.md`](../docs/raspberry-pi.md) is what a first run on a Pi 400 has to confirm.
