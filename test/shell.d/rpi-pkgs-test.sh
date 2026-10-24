@@ -370,13 +370,20 @@ echo "local edit" >>"$src/LOCAL"
 push_commit "Fifth"
 before=$(repo_state)
 run || fail "a checkout with uncommitted changes lets the update go on" "$(output)"
-grep -q "has uncommitted changes, so it is neither updated nor built" "$test_tmp/out" || fail "uncommitted changes are reported" "$(output)"
-grep -qF "sudo git -C $src stash" "$test_tmp/out" || fail "the warning says how to set the changes aside" "$(output)"
+grep -q "has uncommitted changes or untracked files, so it is neither updated nor built" "$test_tmp/out" || fail "uncommitted changes are reported" "$(output)"
+grep -qF "sudo git -C $src stash -u" "$test_tmp/out" || fail "the warning says how to set the changes aside, untracked files included" "$(output)"
 [[ $("$real_git" -C "$src" rev-parse HEAD) == "$local_commit" ]] || fail "a checkout with uncommitted changes is not merged"
 [[ -z $(makepkg_runs) && $(repo_state) == "$before" ]] ||
   fail "uncommitted changes are never built under the name of the commit they sit on" "$(output)"
 "$real_git" -C "$src" checkout -q -- LOCAL
-pass "a checkout with uncommitted changes is neither merged nor built, and the warning says how to set them aside"
+# The build would copy an untracked file just the same.
+echo "local file" >"$src/UNTRACKED"
+run || fail "a checkout with an untracked file lets the update go on" "$(output)"
+grep -q "has uncommitted changes or untracked files" "$test_tmp/out" || fail "an untracked file is reported" "$(output)"
+[[ $("$real_git" -C "$src" rev-parse HEAD) == "$local_commit" && -z $(makepkg_runs) && $(repo_state) == "$before" ]] ||
+  fail "an untracked file is neither merged nor built under the name of a commit that lacks it" "$(output)"
+rm "$src/UNTRACKED"
+pass "a checkout with uncommitted changes or untracked files is neither merged nor built, and the warning says how to set them aside"
 
 run || fail "a diverged checkout still builds" "$(output)"
 grep -q "cannot fast-forward to origin/quattro; building what is there" "$test_tmp/out" || fail "a diverged checkout is reported" "$(output)"

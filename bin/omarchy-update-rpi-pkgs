@@ -194,13 +194,14 @@ pkgbuild_with_version() {
 
 echo -e "\e[32m\nUpdate Omarchy's Raspberry Pi packages\e[0m"
 
-# The packages copy the checkout's working tree, so a build of uncommitted
-# changes would carry them under the name of a commit that lacks them. Leave
-# such a checkout alone, neither merged nor built, and say how to go on: a
-# hand-edited file holds up only this step, not the rest of the update.
-if [[ -n $(src_git status --porcelain --untracked-files=no) ]]; then
-  warn "The Pimarchy checkout at $src has uncommitted changes, so it is neither updated nor built: the Pi keeps the packages it has."
-  warn "Commit them to have them built, or set them aside to follow its upstream again: sudo git -C $src stash"
+# The packages copy the checkout's working tree, untracked files included, so
+# a build of uncommitted changes would carry them under the name of a commit
+# that lacks them. Leave such a checkout alone, neither merged nor built, and
+# say how to go on: a hand-edited file holds up only this step, not the rest of
+# the update.
+if [[ -n $(src_git status --porcelain --untracked-files=normal) ]]; then
+  warn "The Pimarchy checkout at $src has uncommitted changes or untracked files, so it is neither updated nor built: the Pi keeps the packages it has."
+  warn "Commit them to have them built, or set them aside to follow its upstream again: sudo git -C $src stash -u"
   exit 0
 fi
 
