@@ -18,4 +18,4 @@ A Raspberry Pi installs Omarchy's own packages from a local repository, `[pimarc
 
 ## Local changes
 
-None yet.
+1. `omarchy/PKGBUILD` and `omarchy-settings/PKGBUILD`, `prepare()`: the copy of `OMARCHY_SRC` leaves out the checkout's `.git`. Upstream copies the whole checkout, history included, into each package's build directory. The Pi's checkout is a clone of this fork, whose history runs past a gigabyte, and both packages are built on the Pi's SD card at every update that moves it; `package()` never reads the history.

@@ -142,7 +142,9 @@ prepare() {
   if [[ -n "${OMARCHY_SRC:-}" ]]; then
     rm -rf "$srcdir/omarchy"
     mkdir -p "$srcdir/omarchy"
-    cp -a "${OMARCHY_SRC}/." "$srcdir/omarchy/"
+    # Pimarchy: everything but the checkout's git history, which package()
+    # never reads and which outweighs the tree (pi/pkgbuilds/README.md).
+    find "${OMARCHY_SRC}/" -mindepth 1 -maxdepth 1 ! -name .git -exec cp -a -t "$srcdir/omarchy/" {} +
   fi
 }
 
