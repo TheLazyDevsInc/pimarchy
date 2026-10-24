@@ -161,6 +161,45 @@ if [[ $(uname -m) != "aarch64" ]]; then
 fi
 pass "old proot, qemu and mke2fs, a FAT or noexec output, and an output under a private directory fail the prerequisite checks with a reason each"
 
+# ── The image's checkout ─────────────────────────────────────────────────────
+
+if ! command -v git >/dev/null; then
+  skip "the image's checkout (it needs git)"
+else
+  # A source whose history carries a file its last commit no longer has.
+  source_dir=$TMPDIR/clone-source
+  git init -q -b main "$source_dir"
+  head -c 65536 /dev/urandom >"$source_dir/intro.mp4"
+  git -C "$source_dir" add -A
+  git -C "$source_dir" -c user.name=Test -c user.email=test@example.invalid commit -q -m "Add an intro"
+  old_blob=$(git -C "$source_dir" rev-parse HEAD:intro.mp4)
+  git -C "$source_dir" rm -q intro.mp4
+  printf 'Pimarchy\n' >"$source_dir/README.md"
+  git -C "$source_dir" add -A
+  git -C "$source_dir" -c user.name=Test -c user.email=test@example.invalid commit -q -m "Drop the intro"
+  source_commit=$(git -C "$source_dir" rev-parse HEAD)
+
+  # The test is not root: the checkout stays the test's own.
+  output=$(
+    root=$TMPDIR/clone-root branch=main commit=$source_commit origin_url=https://example.invalid/pimarchy.git
+    install() { mkdir -p -- "${@: -1}"; }
+    chown() { :; }
+    clone_source 2>&1
+  ) || fail "the image's checkout clones the commit being built" "$output"
+  dest=$TMPDIR/clone-root$guest_src
+  [[ $(git -C "$dest" rev-parse HEAD) == "$source_commit" && $(git -C "$dest" rev-list --count HEAD) == 2 &&
+    $(git -C "$dest" rev-parse '@{upstream}') == "$source_commit" && -z $(git -C "$dest" status --porcelain) &&
+    $(<"$dest/README.md") == "Pimarchy" ]] ||
+    fail "the image's checkout is the commit being built, with its whole history, on a branch that tracks it" "$output"
+  pass "the image's checkout is the commit being built, with its whole history, on a branch that tracks it"
+  git -C "$dest" rev-list --objects --all --missing=print | grep -qx "?$old_blob" ||
+    fail "the image's checkout leaves out file contents only older commits have"
+  [[ $(git -C "$dest" config remote.origin.url) == "https://example.invalid/pimarchy.git" &&
+    $(git -C "$dest" config remote.origin.promisor) == "true" && -z $(git -C "$dest" config remote.origin.uploadpack) ]] ||
+    fail "the image's checkout fetches what it lacks from the real origin" "$(git -C "$dest" config --list --local)"
+  pass "the image's checkout leaves out file contents only older commits have, and fetches them from the real origin"
+fi
+
 # ── The checks on a finished image root ──────────────────────────────────────
 
 if ! command -v bsdtar >/dev/null || ! command -v git >/dev/null; then

@@ -839,22 +839,32 @@ prepare_root() {
 # ── 5. Checkout ──────────────────────────────────────────────────────────────
 
 # The Pi builds its Omarchy packages from this checkout and fast-forwards it on
-# every update: a clone of the commit being built, with its full history (the
-# package versions count commits), on a branch named like the source's, which
-# tracks the source's origin.
+# every update: a clone of the commit being built, on a branch named like the
+# source's, which tracks the source's origin. It is a blobless partial clone,
+# as git clone --filter=blob:none makes one: every commit and tree (the package
+# versions count commits), but file contents only for the commit checked out,
+# so the history's old theme videos, over a gigabyte, stay off the card. git
+# fetches any other contents from origin when it needs them.
 clone_source() {
   local dest=$root$guest_src ref_name
 
   install -d -m 0755 -o 0 -g 0 "$root/var/lib/pimarchy"
   rm -rf -- "$dest"
   host_git init -q -b "$branch" "$dest"
+  host_git -C "$dest" config core.repositoryformatversion 1
+  host_git -C "$dest" config extensions.partialClone origin
+  host_git -C "$dest" remote add origin "$source_dir"
+  host_git -C "$dest" config remote.origin.promisor true
+  host_git -C "$dest" config remote.origin.partialclonefilter blob:none
   # git hands a local fetch's upload-pack none of this command's -c settings, so
-  # it gets its own: the source may belong to another user.
-  host_git -C "$dest" fetch --quiet --no-tags \
-    --upload-pack="git -c 'safe.directory=*' -c uploadpack.allowAnySHA1InWant=true upload-pack" \
-    "$source_dir" "$commit"
+  # it gets its own: the source may belong to another user, and must serve a
+  # filtered fetch and, during the checkout, the commit's file contents.
+  host_git -C "$dest" config remote.origin.uploadpack \
+    "git -c 'safe.directory=*' -c uploadpack.allowAnySHA1InWant=true -c uploadpack.allowFilter=true upload-pack"
+  host_git -C "$dest" fetch --quiet --no-tags --filter=blob:none origin "$commit"
   host_git -C "$dest" checkout -q -B "$branch" "$commit"
-  host_git -C "$dest" remote add origin "$origin_url"
+  host_git -C "$dest" config --unset remote.origin.uploadpack
+  host_git -C "$dest" remote set-url origin "$origin_url"
   host_git -C "$dest" config "branch.$branch.remote" origin
   host_git -C "$dest" config "branch.$branch.merge" "refs/heads/$branch"
   for ref_name in $(host_git -C "$dest" for-each-ref --format='%(refname)' refs/heads); do
