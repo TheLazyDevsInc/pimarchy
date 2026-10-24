@@ -1,0 +1,148 @@
+#!/bin/bash -p
+
+# Grows a flashed Pimarchy image's root to fill its disk on the first boot.
+# omarchy-rpi-boot installs it as /usr/lib/omarchy/rpi-boot/grow-root, and
+# omarchy-rpi-grow-root.service runs it while the image builder's marker,
+# /var/lib/pimarchy/grow-root-pending, exists. It is not a lifecycle operation.
+#
+# An image is only as large as its contents, so the rest of the card lies after
+# the root partition. On the image's MBR layout (FAT /boot as partition 1, the
+# ext4 root as partition 2) this moves partition 2's end to the end of the disk
+# (or to the next partition), tells the kernel the new size, and grows the
+# mounted filesystem online. With no free space after partition 2 the partition
+# table is left alone, but resize2fs still runs: a power cut after the table
+# changed can leave the filesystem short of its partition, and resize2fs changes
+# nothing when it already fills it. Then the marker goes and the unit disables
+# itself. A root it can't grow (not ext4, or not partition 2 of an MBR disk) is
+# reported and left alone for good. A failed step keeps the marker, so the next
+# boot tries again.
+#
+# systemd runs this as root, which may also run it directly, so it uses fixed
+# paths and checks the platform itself. An unprivileged test may name a fixture
+# root in OMARCHY_RPI_BOOT_ROOT, which prefixes the marker, and stub the tools on
+# its PATH; root ignores both, as omarchy-hw-platform does.
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+set -euo pipefail
+shopt -s inherit_errexit
+export LC_ALL=C
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+if (( $# )); then
+  echo "Usage: grow-root" >&2
+  exit 2
+fi
+
+if (( EUID == 0 )); then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+  fixture=""
+  is_rpi=/usr/bin/omarchy-hw-aarch64-rpi
+else
+  fixture=${OMARCHY_RPI_BOOT_ROOT:-}
+  [[ -n $fixture ]] || fail "grow-root runs as root"
+  [[ $fixture == /* ]] || fail "OMARCHY_RPI_BOOT_ROOT must be an absolute path"
+  fixture=${fixture%/}
+  is_rpi=omarchy-hw-aarch64-rpi
+fi
+
+marker=$fixture/var/lib/pimarchy/grow-root-pending
+unit=omarchy-rpi-grow-root.service
+
+if [[ ! -e $marker ]]; then
+  echo "The root filesystem has already been grown"
+  exit 0
+fi
+
+"$is_rpi" || fail "grow-root grows a Raspberry Pi image's root partition, and this is not a Raspberry Pi"
+
+# The marker goes first: without it the unit no longer runs, even if disabling
+# it fails.
+finish() {
+  rm -f -- "$marker"
+  if ! systemctl --no-reload disable "$unit" >/dev/null; then
+    echo "Could not disable $unit; without its marker it no longer runs" >&2
+  fi
+}
+
+# For a root this can't grow, whatever the next boot brings.
+leave() {
+  echo "Not growing the root filesystem: $*"
+  finish
+  exit 0
+}
+
+# lsblk pads its columns.
+ask_lsblk() {
+  local value
+
+  value=$(lsblk "$@") || return 1
+  printf '%s' "${value//[[:space:]]/}"
+}
+
+source=$(findmnt -nvo SOURCE /) || fail "cannot find the device mounted at /"
+fstype=$(findmnt -no FSTYPE /) || fail "cannot find the type of the filesystem at /"
+[[ $fstype == "ext4" ]] || leave "/ is ${fstype:-of no known type}, not ext4"
+[[ $source == /dev/* ]] || leave "/ is mounted from ${source:-nothing}, not a disk partition"
+
+disk_name=$(ask_lsblk -no PKNAME "$source") || fail "lsblk cannot read $source"
+[[ -n $disk_name ]] || leave "$source is not a partition of a disk"
+disk=/dev/$disk_name
+label=$(ask_lsblk -dno PTTYPE "$disk") || fail "lsblk cannot read $disk"
+[[ $label == "dos" ]] || leave "the partition table of $disk is ${label:-unknown}, not MBR (dos)"
+partition=$(ask_lsblk -no PARTN "$source") || fail "lsblk cannot read $source"
+[[ $partition == "2" ]] || leave "$source is partition ${partition:-unknown} of $disk, not partition 2"
+
+# Partition 2's start and size, and the first partition starting after it, from
+# the table itself, in the table's sectors.
+dump=$(sfdisk --dump "$disk") || fail "sfdisk cannot read the partition table of $disk"
+geometry=$(gawk -v node="$source" '
+  /^sector-size:/ { sector = $2 }
+  $2 == ":" {
+    start = ""; size = ""
+    if (match($0, /start= *([0-9]+)/, field)) start = field[1]
+    if (match($0, /size= *([0-9]+)/, field)) size = field[1]
+    if ($1 == node) { own_start = start; own_size = size; found = 1 }
+    else if (start != "") starts[++count] = start
+  }
+  END {
+    if (!found || own_start == "" || own_size == "") exit 1
+    end = own_start + own_size
+    following = "-"
+    for (i = 1; i <= count; i++)
+      if (starts[i] + 0 >= end && (following == "-" || starts[i] + 0 < following + 0)) following = starts[i] + 0
+    print (sector ? sector : 512), own_start, own_size, following
+  }' <<<"$dump") || fail "the partition table of $disk has no entry for $source"
+read -r sector_size start size following <<<"$geometry"
+
+disk_bytes=$(ask_lsblk -bdno SIZE "$disk") || fail "lsblk cannot read $disk"
+[[ $disk_bytes =~ ^[0-9]+$ ]] || fail "cannot read the size of $disk"
+limit=$(( disk_bytes / sector_size ))
+if [[ $following != "-" ]] && (( following < limit )); then
+  limit=$following
+fi
+# An MBR entry can't reach past sector 2^32.
+(( limit <= 4294967296 )) || limit=4294967296
+free=$(( limit - start - size ))
+
+# Less than the 1 MiB partitions align to is no free space.
+if (( free * sector_size < 1048576 )); then
+  echo "No free space follows $source on $disk"
+else
+  echo "Growing $source by $(( free * sector_size / 1048576 )) MiB to fill $disk"
+  # sfdisk only writes the table: the disk is in use, so partx tells the kernel
+  # the new size of the mounted partition.
+  sfdisk --no-reread --no-tell-kernel --wipe-partitions never -N 2 "$disk" <<<",+" ||
+    fail "sfdisk could not grow partition 2 of $disk"
+  partx -u -n 2 "$disk" || fail "the kernel did not take the new size of partition 2 of $disk"
+fi
+
+resize2fs "$source" || fail "resize2fs could not grow the filesystem on $source"
+finish
+echo "The root filesystem fills $source"

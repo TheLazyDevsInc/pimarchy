@@ -1,0 +1,186 @@
+#!/bin/bash -p
+
+# Raspberry Pi boot verification: the update-verify lifecycle operation
+# (docs/lifecycle-dispatch.md). omarchy-rpi-boot installs it as
+# /usr/lib/omarchy/rpi-boot/update-verify, and omarchy update runs it through
+# omarchy-update-boot after its last package step. It changes nothing.
+#
+# linux-rpi's initramfs is rebuilt by mkinitcpio's own pacman hook, and a hook
+# that fails does not fail the transaction: the firmware would then load a stale
+# initramfs next to the new kernel. So this proves what the next boot loads:
+#
+# - linux-rpi is installed: exactly one /usr/lib/modules/<kver>/pkgbase names it
+# - /boot/kernel8.img, the kernel the firmware boots, is not empty
+# - /boot/initramfs-linux.img was built for that kernel: it holds
+#   usr/lib/modules/<kver>/
+# - config.txt has an active initramfs line, and it loads initramfs-linux.img
+# - the root= of cmdline.txt (its first line, the one the firmware reads)
+#   resolves to the device mounted at /
+#
+# Every failure is explained on stderr, and any failure exits 1.
+#
+# The dispatcher runs this with nothing in its environment but a fixed PATH, and
+# root may run it directly, so it uses fixed paths and checks the platform
+# itself. An unprivileged test may name a fixture root in OMARCHY_RPI_BOOT_ROOT,
+# which prefixes every path this opens (device paths the tools report
+# included), and stub the tools on its PATH; root ignores both, as the
+# dispatcher and omarchy-hw-platform do.
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+set -euo pipefail
+shopt -s inherit_errexit
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+if (( $# )); then
+  echo "Usage: update-verify" >&2
+  exit 2
+fi
+
+if (( EUID == 0 )); then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+  fixture=""
+  is_rpi=/usr/bin/omarchy-hw-aarch64-rpi
+else
+  fixture=${OMARCHY_RPI_BOOT_ROOT:-}
+  [[ -n $fixture ]] || fail "update-verify runs as root"
+  [[ $fixture == /* ]] || fail "OMARCHY_RPI_BOOT_ROOT must be an absolute path"
+  fixture=${fixture%/}
+  is_rpi=omarchy-hw-aarch64-rpi
+fi
+
+"$is_rpi" || fail "update-verify checks a Raspberry Pi's boot partition, and this is not a Raspberry Pi"
+
+boot=$fixture/boot
+kernel=$boot/kernel8.img
+initramfs=$boot/initramfs-linux.img
+config=$boot/config.txt
+cmdline=$boot/cmdline.txt
+
+failed=0
+problem() {
+  echo "Error: $*" >&2
+  failed=1
+}
+
+# Sets the variable named $1 to $2 without leading or trailing whitespace.
+trim() {
+  local text=$2
+
+  text=${text#"${text%%[![:space:]]*}"}
+  printf -v "$1" '%s' "${text%"${text##*[![:space:]]}"}"
+}
+
+# ── The kernel ───────────────────────────────────────────────────────────────
+
+kversions=()
+for pkgbase in "$fixture"/usr/lib/modules/*/pkgbase; do
+  [[ -f $pkgbase ]] || continue
+  read -r name <"$pkgbase" || true
+  if [[ $name == "linux-rpi" ]]; then
+    kversion=${pkgbase%/pkgbase}
+    kversions+=("${kversion##*/}")
+  fi
+done
+
+kversion=""
+if (( ${#kversions[@]} == 0 )); then
+  problem "linux-rpi is not installed: no /usr/lib/modules/*/pkgbase names it, and the Pi firmware boots no other kernel"
+elif (( ${#kversions[@]} > 1 )); then
+  problem "more than one kernel claims to be linux-rpi (${kversions[*]} in /usr/lib/modules); remove the one pacman does not own"
+else
+  kversion=${kversions[0]}
+fi
+
+if [[ ! -s $kernel ]]; then
+  problem "$kernel is missing or empty, so the firmware has no kernel to boot; reinstall linux-rpi"
+fi
+
+# ── The initramfs ────────────────────────────────────────────────────────────
+
+if [[ ! -f $initramfs ]]; then
+  problem "$initramfs is missing; rebuild it with: sudo mkinitcpio -P"
+elif ! listing=$(lsinitcpio -l "$initramfs"); then
+  problem "lsinitcpio cannot list $initramfs, which may be damaged; rebuild it with: sudo mkinitcpio -P"
+elif [[ -n $kversion ]] && ! grep -Fq "usr/lib/modules/$kversion/" <<<"$listing"; then
+  built=$(gawk 'match($0, /^(\.\/)?usr\/lib\/modules\/([^/]+)\//, part) && !seen[part[2]]++ { printf "%s%s", separator, part[2]; separator = ", " }' <<<"$listing")
+  problem "$initramfs was not built for linux-rpi $kversion (it holds modules for ${built:-no kernel}); rebuild it with: sudo mkinitcpio -P"
+fi
+
+# ── config.txt ───────────────────────────────────────────────────────────────
+
+# The firmware takes the last initramfs line that applies to this board: one
+# that is not a comment and that no conditional filter other than [all], [pi4]
+# or [pi400] (both of which a Pi 400 matches) governs.
+if [[ ! -f $config ]]; then
+  problem "$config is missing, so the firmware boots without Omarchy's settings or an initramfs; reinstall linux-rpi and run: sudo omarchy-lifecycle-dispatch setup-boot"
+else
+  initramfs_line=""
+  filter=all
+  while IFS= read -r line || [[ -n $line ]]; do
+    trim line "$line"
+    if [[ $line == \[*\] ]]; then
+      filter=${line:1:${#line}-2}
+      filter=${filter,,}
+    elif [[ $line =~ ^initramfs[[:space:]] ]] && [[ $filter == "all" || $filter == "pi4" || $filter == "pi400" ]]; then
+      initramfs_line=$line
+    fi
+  done <"$config"
+
+  read -r _ loaded _ <<<"$initramfs_line"
+  if [[ -z $initramfs_line ]]; then
+    problem "$config has no active initramfs line, so the firmware boots linux-rpi without its initramfs; add: initramfs initramfs-linux.img followkernel"
+  elif [[ ${loaded#/} != "initramfs-linux.img" ]]; then
+    problem "$config loads the initramfs ${loaded:-(none named)}, not initramfs-linux.img, which linux-rpi's mkinitcpio preset rebuilds"
+  fi
+fi
+
+# ── cmdline.txt ──────────────────────────────────────────────────────────────
+
+if [[ ! -f $cmdline ]]; then
+  problem "$cmdline is missing, so the kernel gets no root=; run: sudo omarchy-lifecycle-dispatch setup-boot"
+else
+  first_line=""
+  IFS= read -r first_line <"$cmdline" || true
+  read -ra tokens <<<"${first_line//$'\r'/}"
+  root_spec=""
+  for token in "${tokens[@]}"; do
+    if [[ $token == root=* ]]; then
+      root_spec=${token#root=}
+    fi
+  done
+
+  # The device the initramfs mounts: it looks a tag up through blkid, as findfs
+  # does, and takes a device path as it is.
+  device=""
+  case $root_spec in
+    PARTUUID=* | UUID=* | LABEL=* | PARTLABEL=*)
+      device=$(findfs "$root_spec" 2>/dev/null) || device=""
+      ;;
+    /dev/*)
+      device=$root_spec
+      ;;
+  esac
+  mounted=$(findmnt -nvo SOURCE /) || mounted=""
+  trim mounted "$mounted"
+
+  if [[ -z $root_spec ]]; then
+    problem "$cmdline names no root=, so the kernel cannot find the root filesystem; run: sudo omarchy-lifecycle-dispatch setup-boot"
+  elif [[ -z $device || ! -e $fixture$device ]]; then
+    problem "root=$root_spec in $cmdline matches no device on this machine, so the next boot cannot mount its root; run: sudo omarchy-lifecycle-dispatch setup-boot"
+  elif [[ -z $mounted || ! $fixture$device -ef $fixture$mounted ]]; then
+    problem "root=$root_spec in $cmdline is $device, but / is mounted from ${mounted:-an unknown device}; run: sudo omarchy-lifecycle-dispatch setup-boot"
+  fi
+fi
+
+if (( failed )); then
+  echo "The Raspberry Pi's boot files may not boot the updated system; fix the errors above before rebooting." >&2
+  exit 1
+fi
+echo "The Raspberry Pi's boot files boot linux-rpi $kversion"

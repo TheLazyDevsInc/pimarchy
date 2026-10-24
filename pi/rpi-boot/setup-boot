@@ -1,0 +1,329 @@
+#!/bin/bash -p
+
+# Raspberry Pi boot setup: the setup-boot lifecycle operation
+# (docs/lifecycle-dispatch.md). omarchy-rpi-boot installs it as
+# /usr/lib/omarchy/rpi-boot/setup-boot, and hardware setup's last leaf runs it
+# through omarchy-lifecycle-dispatch on every install and rerun, and on an
+# image's first boot with image-first-boot.
+#
+# The Pi firmware boots linux-rpi from the FAT partition mounted at /boot, as
+# config.txt and cmdline.txt there say. linux-rpi owns both as backup files, so
+# they are edited in place, never replaced, and its upgrades keep the edits:
+#
+# - cmdline.txt becomes one line (the firmware reads no other). root= names the
+#   partition mounted at / by its PARTUUID; rw, rootwait and fsck.repair=yes
+#   stay; console=tty1 is the last console, where boot messages and Plymouth
+#   go; and every parameter of KERNEL_CMDLINE[default] in
+#   /etc/limine-entry-tool.d/omarchy-defaults.conf is there, so the Pi boots as
+#   quiet and splashed as a Limine machine. Every other token stays. A default
+#   whose name is already on the line keeps the value there, so nothing is added
+#   twice and an owner's loglevel=7 survives.
+# - config.txt keeps everything linux-rpi wrote. Omarchy's settings go in one
+#   block between "# BEGIN Omarchy" and "# END Omarchy", appended at the end the
+#   first time and replaced in place after that, under [all]: disable_splash=1,
+#   and the initramfs and vc4-kms-v3d lines only while no line outside the block
+#   already loads them on this board.
+#
+# Both files are worked out before either is written. Each edit writes a
+# temporary file on /boot and renames it over the original, and the first edit
+# of each file keeps the original as <file>.omarchy-backup.
+#
+# Then the initramfs. On an image's first boot this asks for the rebuild the
+# deferred hardware setup makes after its last step; otherwise mkinitcpio -P
+# rebuilds it when it is missing or older than its configuration.
+#
+# The dispatcher runs this with nothing in its environment but a fixed PATH, and
+# root may run it directly, so it uses fixed paths and checks the platform
+# itself. An unprivileged test may name a fixture root in OMARCHY_RPI_BOOT_ROOT,
+# which prefixes every path this opens, and stub the tools on its PATH; root
+# ignores both, as the dispatcher and omarchy-hw-platform do.
+if [[ $- != *p* ]]; then
+  echo "Refusing an unsafe Bash startup." >&2
+  exit 126
+fi
+
+set -euo pipefail
+shopt -s inherit_errexit
+umask 022
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+if (( $# == 0 )); then
+  first_boot=0
+elif (( $# == 1 )) && [[ $1 == "image-first-boot" ]]; then
+  first_boot=1
+else
+  echo "Usage: setup-boot [image-first-boot]" >&2
+  exit 2
+fi
+
+if (( EUID == 0 )); then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+  fixture=""
+  is_rpi=/usr/bin/omarchy-hw-aarch64-rpi
+else
+  fixture=${OMARCHY_RPI_BOOT_ROOT:-}
+  [[ -n $fixture ]] || fail "setup-boot runs as root"
+  [[ $fixture == /* ]] || fail "OMARCHY_RPI_BOOT_ROOT must be an absolute path"
+  fixture=${fixture%/}
+  is_rpi=omarchy-hw-aarch64-rpi
+fi
+
+"$is_rpi" || fail "setup-boot sets up a Raspberry Pi's boot partition, and this is not a Raspberry Pi"
+
+boot=$fixture/boot
+cmdline=$boot/cmdline.txt
+config=$boot/config.txt
+initramfs=$boot/initramfs-linux.img
+defaults=$fixture/etc/limine-entry-tool.d/omarchy-defaults.conf
+image_dir=$fixture/var/lib/omarchy/image
+
+for file in "$cmdline" "$config"; do
+  [[ -f $file ]] || fail "$file is missing: the Pi's boot partition must be mounted at /boot, with linux-rpi installed"
+done
+
+# Sets the variable named $1 to $2 without leading or trailing whitespace.
+trim() {
+  local text=$2
+
+  text=${text#"${text%%[![:space:]]*}"}
+  printf -v "$1" '%s' "${text%"${text##*[![:space:]]}"}"
+}
+
+# ── cmdline.txt ──────────────────────────────────────────────────────────────
+
+partuuid=$(findmnt -no PARTUUID /) || partuuid=""
+trim partuuid "$partuuid"
+[[ $partuuid =~ ^[[:xdigit:]]+(-[[:xdigit:]]+)*$ ]] ||
+  fail "cannot find the PARTUUID of the partition mounted at /${partuuid:+ (findmnt reports \"$partuuid\")}"
+
+# Root sources the defaults, so they must be root's (the caller's own inside a
+# fixture), as must their directory, and writable by nobody else.
+owned() {
+  local path=$1 owner mode
+
+  [[ -e $path && ! -L $path ]] || return 1
+  read -r owner mode < <(stat -c '%u %a' -- "$path") || return 1
+  (( owner == EUID && (8#$mode & 8#022) == 0 ))
+}
+
+[[ -f $defaults ]] || fail "$defaults is missing: omarchy-settings provides the kernel parameters"
+if ! owned "$defaults" || ! owned "${defaults%/*}"; then
+  fail "refusing $defaults: it must be a root-owned file in a root-owned directory, writable by no one else"
+fi
+kernel_defaults=$(
+  declare -A KERNEL_CMDLINE=()
+  source "$defaults" >/dev/null
+  printf '%s' "${KERNEL_CMDLINE[default]:-}"
+) || fail "cannot read the kernel parameters in $defaults"
+
+mapfile -t lines <"$cmdline"
+first_line=${lines[0]:-}
+read -ra tokens <<<"${first_line//$'\r'/}"
+for line in "${lines[@]:1}"; do
+  trim line "$line"
+  if [[ -n $line ]]; then
+    echo "Dropping the lines after the first in $cmdline, which the firmware never reads"
+    break
+  fi
+done
+
+out=()
+
+# Whether a token named $1 (the text before any "=") is on the line.
+has() {
+  local token
+
+  for token in "${out[@]}"; do
+    if [[ ${token%%=*} == "$1" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The first root= becomes the root partition's PARTUUID and later ones go, since
+# the kernel would take the last. console=tty1 is placed below.
+root_token=root=PARTUUID=$partuuid
+for token in "${tokens[@]}"; do
+  if [[ $token == root=* ]]; then
+    has root || out+=("$root_token")
+  elif [[ $token != "console=tty1" ]]; then
+    out+=("$token")
+  fi
+done
+has root || out=("$root_token" "${out[@]}")
+
+# ALARM's own boot parameters follow root=, as it writes them.
+base=()
+has rw || has ro || base+=(rw)
+has rootwait || base+=(rootwait)
+has fsck.repair || base+=(fsck.repair=yes)
+for index in "${!out[@]}"; do
+  [[ ${out[index]} != root=* ]] || break
+done
+out=("${out[@]:0:index+1}" "${base[@]}" "${out[@]:index+1}")
+
+# The last console= is /dev/console: boot messages, the emergency shell and
+# Plymouth go there, so tty1 follows any serial console.
+last_console=-1
+for index in "${!out[@]}"; do
+  if [[ ${out[index]} == console=* ]]; then
+    last_console=$index
+  fi
+done
+if (( last_console < 0 )); then
+  out+=(console=tty1)
+else
+  out=("${out[@]:0:last_console+1}" console=tty1 "${out[@]:last_console+1}")
+fi
+
+read -ra wanted <<<"$kernel_defaults"
+for token in "${wanted[@]}"; do
+  has "${token%%=*}" || out+=("$token")
+done
+
+printf -v cmdline_content '%s ' "${out[@]}"
+cmdline_content=${cmdline_content% }
+
+# ── config.txt ───────────────────────────────────────────────────────────────
+
+mapfile -t lines <"$config"
+before=()
+after=()
+found=0
+inside=0
+for line in "${lines[@]}"; do
+  trim marker "$line"
+  if (( inside )); then
+    [[ $marker != "# END Omarchy" ]] || inside=0
+  elif [[ $marker == "# BEGIN Omarchy" ]]; then
+    # A second block is dropped; the first one's place is kept.
+    inside=1
+    found=1
+  elif (( found )); then
+    after+=("$line")
+  else
+    before+=("$line")
+  fi
+done
+(( ! inside )) || fail "$config opens a \"# BEGIN Omarchy\" block that no \"# END Omarchy\" closes; fix it by hand"
+
+# Which of the lines Omarchy adds already load outside the block on this board: a
+# line counts unless it is a comment or a conditional filter other than [all],
+# [pi4] or [pi400] (both of which a Pi 400 matches) governs it. Each part of
+# the file starts under [all]: the top, and the lines after the block, which
+# ends under its own [all].
+loads_initramfs=0
+loads_kms=0
+scan() {
+  local line filter=all
+
+  for line in "$@"; do
+    trim line "$line"
+    if [[ $line == \[*\] ]]; then
+      filter=${line:1:${#line}-2}
+      filter=${filter,,}
+    elif [[ -n $line && $line != \#* ]] && [[ $filter == "all" || $filter == "pi4" || $filter == "pi400" ]]; then
+      if [[ $line =~ ^initramfs[[:space:]] ]]; then
+        loads_initramfs=1
+      fi
+      if [[ $line =~ ^dtoverlay[[:space:]]*=[[:space:]]*vc4-kms-v3d([-,].*)?$ ]]; then
+        loads_kms=1
+      fi
+    fi
+  done
+}
+scan "${before[@]}"
+scan "${after[@]}"
+
+block=(
+  "# BEGIN Omarchy"
+  "# Written by omarchy-rpi-boot's setup-boot, which replaces this block on every run."
+  "[all]"
+  "disable_splash=1"
+)
+(( loads_initramfs )) || block+=("initramfs initramfs-linux.img followkernel")
+(( loads_kms )) || block+=("dtoverlay=vc4-kms-v3d")
+block+=("# END Omarchy")
+
+if (( found )); then
+  result=("${before[@]}" "${block[@]}" "${after[@]}")
+else
+  result=("${before[@]}")
+  if (( ${#result[@]} )); then
+    trim marker "${result[-1]}"
+    if [[ -n $marker ]]; then
+      result+=("")
+    fi
+  fi
+  result+=("${block[@]}")
+fi
+
+printf -v config_content '%s\n' "${result[@]}"
+config_content=${config_content%$'\n'}
+
+# ── Writing ──────────────────────────────────────────────────────────────────
+
+temporary=""
+trap '[[ -z $temporary ]] || rm -f -- "$temporary"' EXIT
+
+# Writes standard input to $1 through a temporary file beside it, so a crash
+# leaves the old file or the new one, never part of either. It takes the mode of
+# $2 (FAT has none to keep).
+write_atomically() {
+  local file=$1 reference=$2
+
+  temporary=$(mktemp "${file%/*}/.${file##*/}.XXXXXX")
+  cat >"$temporary"
+  chmod --reference="$reference" -- "$temporary" 2>/dev/null || true
+  sync -- "$temporary"
+  mv -f -- "$temporary" "$file"
+  temporary=""
+  sync -f -- "$file"
+}
+
+# Makes file $1 hold $2 and a final newline, keeping the original the first time
+# it changes.
+update_file() {
+  local file=$1 content=$2 current
+
+  { IFS= read -r -d '' current || true; } <"$file"
+  [[ $current != "$content"$'\n' ]] || return 0
+
+  if [[ ! -e $file.omarchy-backup ]]; then
+    write_atomically "$file.omarchy-backup" "$file" <"$file"
+  fi
+  write_atomically "$file" "$file" <<<"$content"
+  echo "Updated $file"
+}
+
+update_file "$cmdline" "$cmdline_content"
+update_file "$config" "$config_content"
+
+# ── initramfs ────────────────────────────────────────────────────────────────
+
+if (( first_boot )); then
+  [[ -d $image_dir ]] || fail "image-first-boot is for an image's first boot, but $image_dir does not exist"
+  touch -- "$image_dir/boot-rebuild"
+  echo "Asked the deferred hardware setup to rebuild the initramfs after its last step"
+else
+  rebuild=0
+  if [[ ! -e $initramfs ]]; then
+    rebuild=1
+  else
+    for input in "$fixture/etc/mkinitcpio.conf" "$fixture"/etc/mkinitcpio.conf.d/*.conf; do
+      if [[ -e $input && $input -nt $initramfs ]]; then
+        rebuild=1
+      fi
+    done
+  fi
+
+  if (( rebuild )); then
+    echo "Rebuilding the initramfs"
+    mkinitcpio -P </dev/null || fail "mkinitcpio -P could not rebuild the initramfs"
+  fi
+fi

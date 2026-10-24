@@ -1,0 +1,35 @@
+# Grows a flashed Pimarchy image's root partition and filesystem to fill its SD
+# card on the first boot (/usr/lib/omarchy/rpi-boot/grow-root). The image
+# builder creates the marker and enables the unit; grow-root removes the marker
+# and disables the unit once the root fills the card, or once it finds a root it
+# can't grow. A failed run keeps the marker, and the next boot tries again.
+#
+# It runs in early boot, without the default dependencies: after
+# systemd-remount-fs.service has made the root writable and before
+# local-fs.target. The initramfs already mounted the root, which is all it
+# needs, and everything ordered after local-fs.target (sysinit.target, so every
+# ordinary service) then starts on the grown filesystem. That includes
+# omarchy-provision-hardware.service, whose keyring, deferred steps and
+# initramfs rebuild need room the image was built without, and the journal's
+# flush to /var. Ordering it only before omarchy-provision-hardware.service
+# would leave the rest of early boot writing to a nearly full root while the
+# online resize runs. local-fs.target only wants it, so a failure doesn't stop
+# the boot.
+[Unit]
+Description=Grow the root partition to fill the boot disk
+Documentation=file:///usr/lib/omarchy/rpi-boot/grow-root
+DefaultDependencies=no
+ConditionPathExists=/var/lib/pimarchy/grow-root-pending
+RequiresMountsFor=/var/lib/pimarchy
+After=systemd-remount-fs.service
+Before=local-fs.target omarchy-provision-hardware.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy/rpi-boot/grow-root
+# An online resize of a large card takes a while; stopping it halfway gains nothing.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=local-fs.target
