@@ -34,8 +34,27 @@ chmod +x "$fake_bin/snapper"
 cat >"$fake_bin/systemctl" <<'STUB'
 #!/bin/bash
 printf 'systemctl %s\n' "$*" >>"$TEST_LOG"
+# Units read as stopped while TEST_UNITS_DOWN is set, as on a machine whose
+# snapshot services never ran.
+[[ ${TEST_UNITS_DOWN:-0} == "0" || ! $1 =~ ^is- ]]
 STUB
 chmod +x "$fake_bin/systemctl"
+
+# The root filesystem, btrfs unless a test says otherwise.
+cat >"$fake_bin/findmnt" <<'STUB'
+#!/bin/bash
+[[ $* == "-no FSTYPE /" ]] || exit 1
+printf '%s\n' "${TEST_ROOT_FSTYPE:-btrfs}"
+STUB
+chmod +x "$fake_bin/findmnt"
+
+# Only the stubs here count as installed, so this machine's own snapper never
+# decides whether the setup runs.
+cat >"$fake_bin/omarchy-cmd-missing" <<STUB
+#!/bin/bash
+[[ ! -x $fake_bin/\$1 ]]
+STUB
+chmod +x "$fake_bin/omarchy-cmd-missing"
 
 notification_migration=$(grep -rl 'Disable Limine Snapper warning notifier' "$ROOT/migrations" | head -n 1 || true)
 [[ -n $notification_migration ]] || fail "Limine Snapper warning notifier migration exists"
@@ -70,6 +89,57 @@ grep -Fx 'SNAPPER_CONFIGS="root"' "$test_tmp/etc/conf.d/snapper" >/dev/null || f
 grep -Fx 'systemctl disable --now snapper-timeline.timer' "$test_tmp/calls.log" >/dev/null || fail "snapshot configure disables timeline snapshots"
 grep -Fx 'systemctl enable --now snapper-cleanup.timer limine-snapper-sync.service' "$test_tmp/calls.log" >/dev/null || fail "snapshot configure enables cleanup and Limine snapshot sync"
 pass "snapshot configure normalizes Snapper policy and services"
+
+# A machine without snapper or without a btrfs root, such as a Raspberry Pi on
+# ext4, skips the setup instead of failing system setup. run_logged sources the
+# leaf; migrations run it as a script, so both must come back cleanly.
+run_snapper_setup() {
+  TEST_LOG="$test_tmp/calls.log" \
+  PATH="$fake_bin:$PATH" \
+  OMARCHY_PATH="$ROOT" \
+  OMARCHY_SNAPPER_CONFIG_PATH="$test_tmp/skip/etc/snapper/configs/root" \
+  OMARCHY_SNAPPER_CONF_PATH="$test_tmp/skip/etc/conf.d/snapper" \
+    "$@"
+}
+
+: >"$test_tmp/calls.log"
+mv "$fake_bin/snapper" "$fake_bin/snapper.off"
+output=$(run_snapper_setup bash -euo pipefail "$ROOT/install/config/snapper.sh") || fail "snapshot configure succeeds without snapper"
+[[ $output == *"snapper is not installed"* ]] || fail "snapshot configure says why it skipped" "$output"
+output=$(run_snapper_setup bash -eE -c 'source "$1"; echo "caller continues"' bash "$ROOT/install/config/snapper.sh") ||
+  fail "sourced, snapshot configure succeeds without snapper"
+[[ $output == *"caller continues" ]] || fail "sourced, the skip hands control back to its caller" "$output"
+mv "$fake_bin/snapper.off" "$fake_bin/snapper"
+output=$(TEST_ROOT_FSTYPE=ext4 run_snapper_setup bash -euo pipefail "$ROOT/install/config/snapper.sh") ||
+  fail "snapshot configure succeeds on an ext4 root"
+[[ $output == *"ext4, not btrfs"* ]] || fail "snapshot configure names the root filesystem it skipped" "$output"
+[[ ! -e $test_tmp/skip ]] || fail "a skipped setup writes no Snapper config"
+[[ ! -s $test_tmp/calls.log ]] || fail "a skipped setup creates no config and touches no service" "$(<"$test_tmp/calls.log")"
+pass "snapshot configure skips cleanly without snapper or a btrfs root"
+
+# The service repair migration runs the leaf on a machine whose services never
+# ran. Without snapper it completes rather than staying pending. The copy reads
+# the leaf from this checkout instead of an installed package.
+service_migration=$(grep -rl 'Normalize Snapper snapshot services' "$ROOT/migrations" | head -n 1)
+sed 's|/usr/share/omarchy/install/config/snapper.sh|/nonexistent/snapper.sh|' "$service_migration" >"$test_tmp/service-migration.sh"
+grep -qF /nonexistent/snapper.sh "$test_tmp/service-migration.sh" || fail "the migration copy reads the checkout's leaf"
+cat >"$fake_bin/sudo" <<'STUB'
+#!/bin/bash
+printf 'sudo %s\n' "$*" >>"$TEST_LOG"
+exec "$@"
+STUB
+chmod +x "$fake_bin/sudo"
+: >"$test_tmp/calls.log"
+mv "$fake_bin/snapper" "$fake_bin/snapper.off"
+TEST_UNITS_DOWN=1 run_snapper_setup bash -euo pipefail "$test_tmp/service-migration.sh" >/dev/null ||
+  fail "the Snapper service migration completes on a machine without snapper"
+mv "$fake_bin/snapper.off" "$fake_bin/snapper"
+grep -q '^sudo env OMARCHY_PATH=.* bash -euo pipefail .*/install/config/snapper.sh$' "$test_tmp/calls.log" ||
+  fail "the migration ran the setup leaf" "$(<"$test_tmp/calls.log")"
+[[ ! -e $test_tmp/skip ]] || fail "the migration writes no Snapper config without snapper"
+! grep -qE '^(snapper|systemctl (enable|disable)) ' "$test_tmp/calls.log" ||
+  fail "the migration creates no config and touches no service without snapper" "$(<"$test_tmp/calls.log")"
+pass "the Snapper service migration completes without snapper"
 
 setup_system="$ROOT/bin/omarchy-apply-system"
 grep -F 'config/all.sh' "$setup_system" >/dev/null ||
