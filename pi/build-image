@@ -187,6 +187,10 @@ parse_options() {
   if (( image_bytes < (boot_mib + 1 + 256) * 1048576 )); then
     fail "--size $size_text leaves no room for a root partition beside the $boot_mib MiB boot partition"
   fi
+  # An MBR counts 512-byte sectors in 32 bits.
+  if (( image_bytes > 2 ** 32 * 512 )); then
+    fail "--size $size_text is larger than an MBR disk can be (2 TiB); the root grows to fill the card on its first boot anyway"
+  fi
 
   if [[ -z $source_dir ]]; then
     source_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)

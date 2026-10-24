@@ -42,6 +42,9 @@ expect_refusal "an unknown option is refused" "unknown option: --frobnicate" --f
 expect_refusal "a channel other than stable, rc or edge is refused" "--channel must be stable, rc or edge" --channel beta
 expect_refusal "a size that is not a size is refused" "--size must be a size" --size 12X
 expect_refusal "a size with no room beside the boot partition is refused" "leaves no room for a root partition" --size 700M
+# The missing tarball stops a builder that takes the size before it does more.
+expect_refusal "a size larger than an MBR disk can be is refused" "larger than an MBR disk can be" \
+  --size 2049G --tarball "$TMPDIR/missing.tar.gz"
 expect_refusal "an option without its value is refused" "--output needs a value" --output
 expect_refusal "a tarball that does not exist is refused" "is not a file" --tarball "$TMPDIR/missing.tar.gz"
 
