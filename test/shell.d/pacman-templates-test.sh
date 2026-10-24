@@ -311,3 +311,45 @@ if refresh stable; then fail "an unknown platform is refused"; fi
 [[ -z $(events) ]] || fail "an unknown platform stops before anything" "$(events)"
 assert_boundary_cold "unknown platform"
 pass "a channel without a template, or a machine whose platform can't be told, changes nothing"
+
+# ── the channel a refresh keeps ──────────────────────────────────────────────
+
+# A Pi installs omarchy and omarchy-settings from its own builds on every
+# channel, so with edge's templates in place that pair is edge there, and a
+# refresh with no channel keeps it. Elsewhere the pair on edge's repositories is
+# a switch that never installed the -dev pair, which a refresh puts back on the
+# default channel. The real channel detection runs on fixture hardware and reads
+# the edge templates as this machine's.
+if (( EUID == 0 )); then
+  skip "a refresh with no channel keeps a Pi on edge (omarchy-hw-platform ignores fixtures as root)"
+else
+  sed "s|/usr/share/omarchy|$SUDO_TEST_ROOT|" "$ROOT/bin/omarchy-channel-current" >"$SUDO_TEST_ROOT/bin/omarchy-channel-current"
+  sed -e "s|/etc/pacman.d/mirrorlist|$boundary_tmp/mirrorlist|g" -e "s|/etc/pacman.conf|$boundary_tmp/pacman.conf|g" \
+    "$ROOT/bin/omarchy-version-channel" >"$SUDO_TEST_ROOT/bin/omarchy-version-channel"
+  chmod +x "$SUDO_TEST_ROOT/bin/omarchy-channel-current" "$SUDO_TEST_ROOT/bin/omarchy-version-channel"
+  ln -sfn "$ROOT/bin/omarchy-hw-platform" "$ROOT/bin/omarchy-hw-aarch64-rpi" "$SUDO_TEST_ROOT/bin/"
+  # Only omarchy and omarchy-settings are installed.
+  rm "$SUDO_TEST_ROOT/bin/pacman"
+  cat >"$SUDO_TEST_ROOT/bin/pacman" <<'STUB'
+#!/bin/bash
+printf 'step:pacman %s\n' "$*" >>"$SUDO_TEST_LOG"
+[[ $1 != "-Q" || $* == "-Q omarchy omarchy-settings" ]]
+STUB
+  chmod +x "$SUDO_TEST_ROOT/bin/pacman"
+  for platform in aarch64-rpi aarch64 x86; do
+    templates=$(omarchy_pacman_templates "$platform")
+    cp "$templates/pacman-edge.conf" "$boundary_tmp/pacman.conf"
+    cp "$templates/mirrorlist-edge" "$boundary_tmp/mirrorlist"
+    # The refresh's PATH is the fixture's bin/, so the fake CPU goes there.
+    fake_platform "$SUDO_TEST_ROOT" "$platform"
+    expected=stable
+    [[ $platform != "aarch64-rpi" ]] || expected=edge
+    reset_boundary
+    OMARCHY_PROC_ROOT="$SUDO_TEST_ROOT/proc" refresh || fail "$platform on edge with omarchy refreshes" "$(cat "$boundary_tmp/output")"
+    grep -F "step:cp $templates/pacman-$expected.conf " "$SUDO_TEST_LOG" >/dev/null &&
+      grep -F "step:cp $templates/mirrorlist-$expected " "$SUDO_TEST_LOG" >/dev/null ||
+      fail "$platform on edge with omarchy refreshes to $expected" "$(events)"
+    assert_boundary_cold "$platform on edge with omarchy"
+  done
+  pass "a refresh with no channel keeps a Pi on edge with its own omarchy, and moves that pair elsewhere to the default channel"
+fi

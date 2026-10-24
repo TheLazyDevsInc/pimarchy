@@ -23,6 +23,16 @@ elif pacman -Q omarchy omarchy-settings >/dev/null 2>&1; then
   case "$channel" in
     stable) echo stable ;;
     rc) echo rc ;;
+    # A Raspberry Pi keeps this pair, its own builds, on edge too
+    # (omarchy-channel-set). Anywhere else it means a switch to edge that never
+    # installed the -dev pair, which a refresh puts back on the default channel.
+    edge)
+      if omarchy-hw-aarch64-rpi; then
+        echo edge
+      else
+        echo unknown
+      fi
+      ;;
     *) echo unknown ;;
   esac
 else
