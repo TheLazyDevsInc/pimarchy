@@ -17,6 +17,8 @@ done
 systemctl disable systemd-networkd-wait-online.service 2>/dev/null || true
 systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true
 
+networkd_dir=${OMARCHY_NETWORKD_DIR:-/etc/systemd/network}
+
 stock_networkd_file() {
   local file="$1"
 
@@ -30,9 +32,28 @@ stock_networkd_file() {
   grep -Eq '^[[:space:]]*Name=(en\*|eth\*|wl\*|ww\*)[[:space:]]*$' "$file" || return 1
 }
 
-backup_dir="/etc/systemd/network/omarchy-networkd-retired-$(date +%Y%m%d%H%M%S)"
-for file in /etc/systemd/network/20-ethernet.network /etc/systemd/network/20-wlan.network /etc/systemd/network/20-wwan.network; do
+# Arch Linux ARM's root filesystem, which a Raspberry Pi install starts from,
+# enables systemd-networkd with DHCP on every wired interface through
+# en.network (Name=en*) and eth.network (Name=eth*). Retire them only while
+# they still hold that stock content, apart from the CRLF line endings ALARM
+# ships, so an administrator's own files of the same name stay.
+alarm_networkd_file() {
+  local file="$1" name
+
+  [[ -f $file ]] || return 1
+  name=$(basename "$file" .network)
+  [[ $(tr -d '\r' <"$file") == $'[Match]\nName='"$name"$'*\n\n[Network]\nDHCP=yes\nDNSSEC=no' ]]
+}
+
+backup_dir="$networkd_dir/omarchy-networkd-retired-$(date +%Y%m%d%H%M%S)"
+for file in "$networkd_dir/20-ethernet.network" "$networkd_dir/20-wlan.network" "$networkd_dir/20-wwan.network"; do
   if stock_networkd_file "$file"; then
+    install -d -m 0755 "$backup_dir"
+    mv "$file" "$backup_dir/"
+  fi
+done
+for file in "$networkd_dir/en.network" "$networkd_dir/eth.network"; do
+  if alarm_networkd_file "$file"; then
     install -d -m 0755 "$backup_dir"
     mv "$file" "$backup_dir/"
   fi
