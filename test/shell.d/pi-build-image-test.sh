@@ -178,9 +178,14 @@ output=$(
   }
   swap_kernel 2>&1
 ) || fail "the kernel swap installs the Pi's family list" "$output"
-[[ $output == *"pacman -Syu --needed linux-rpi raspberrypi-bootloader wf-recorder"* && $output != *omarchy-rpi-boot* ]] ||
+[[ $output == *"pacman -Syu --needed linux-rpi raspberrypi-bootloader wf-recorder "* && $output != *omarchy-rpi-boot* ]] ||
   fail "the kernel swap installs the family list but its local packages, which the build has not built yet" "$output"
 pass "the kernel swap installs the family list but its local packages, which the build has not built yet"
+# wf-recorder's ffmpeg needs a JACK library: pipewire-jack has to be in that
+# same transaction, or pacman picks jack2.
+[[ $output == *"pacman -Syu --needed "*" pipewire-jack "* && $output == *"pacman -Syu --needed "*" pipewire-pulse "* ]] ||
+  fail "the kernel swap installs the ISO's PipeWire stack with the family list" "$output"
+pass "the kernel swap installs the ISO's PipeWire stack with the family list, so pipewire-jack provides JACK"
 
 # ── The image's checkout ─────────────────────────────────────────────────────
 

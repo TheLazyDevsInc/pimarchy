@@ -41,6 +41,10 @@ kernel_package=linux-rpi
 boot_mib=512
 build_user=pimarchy-build
 local_packages=(omarchy-settings omarchy omarchy-rpi-boot)
+# The audio stack the Omarchy ISO's archinstall step installs on every install,
+# outside Omarchy's package lists (omarchy-upgrade-to-quattro installs the same
+# set for upgrades): PipeWire with its PulseAudio, ALSA and JACK servers.
+audio_packages=(pipewire pipewire-alsa pipewire-jack pipewire-pulse gst-plugin-pipewire libpulse wireplumber)
 guest_src=/var/lib/pimarchy/src
 guest_repo=/var/lib/pimarchy/repo
 guest_build=/var/tmp/pimarchy-build
@@ -1039,8 +1043,12 @@ swap_kernel() {
   for package in "${family[@]}"; do
     [[ " ${local_packages[*]} " == *" $package "* ]] || boot+=("$package")
   done
-  echo "Upgrading the root and installing ${boot[*]}"
-  guest_pacman -Syu --needed "${boot[@]}"
+  # The audio stack goes in with them: wf-recorder pulls in ffmpeg, which needs
+  # a JACK library, and only pipewire-jack named in the same transaction keeps
+  # pacman from choosing jack2, which pipewire-jack can't replace later without
+  # a conflict prompt.
+  echo "Upgrading the root and installing ${boot[*]} ${audio_packages[*]}"
+  guest_pacman -Syu --needed "${boot[@]}" "${audio_packages[@]}"
 
   rm -f -- "$root"/boot/*.pacsave
   [[ -s $root/boot/kernel8.img && -f $root/boot/config.txt && -f $root/boot/cmdline.txt ]] ||
@@ -1206,7 +1214,7 @@ install_omarchy() {
   echo "Installing omarchy, omarchy-rpi-boot and ${#defaults[@]} default packages"
   guest_pacman -S --needed omarchy omarchy-rpi-boot "${defaults[@]}"
 
-  mapfile -t unmet < <(guest_retry pacman -T "${defaults[@]}" omarchy omarchy-settings omarchy-rpi-boot || true)
+  mapfile -t unmet < <(guest_retry pacman -T "${defaults[@]}" "${audio_packages[@]}" omarchy omarchy-settings omarchy-rpi-boot || true)
   (( ! ${#unmet[@]} )) || fail "not installed: ${unmet[*]}"
 }
 
