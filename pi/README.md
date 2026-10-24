@@ -117,7 +117,7 @@ Under the proot runner, a few pacman runs in a hundred die of a heap corruption 
 
 QEMU 9.0 and newer emulate the Pi 4's SoC as the `raspi4b` machine, which is enough to run an image's first boot without a Pi: the root grows, the deferred hardware setup runs, the initramfs is rebuilt and the owner wizard starts on tty1. QEMU emulates no GPU, USB, network, Wi-Fi or Bluetooth for this board, so Hyprland never starts, and its SD card must be a power of two in size. Ubuntu 24.04's QEMU is 8.2, so build QEMU 10 with `./configure --target-list=aarch64-softmmu` there.
 
-The Pi's console is the mini UART, which QEMU can't drive, and the PL011 belongs to Bluetooth, so the test copy of the device tree drops the Bluetooth node and swaps the two UARTs' aliases, so the PL011 is `serial0` and `ttyAMA0`. The firmware never runs: QEMU loads the kernel, device tree and initramfs itself, and a debug shell on the serial console stands in for a login, since the image has none. Work on a copy, since the first boot changes it:
+The Pi's console is the mini UART, which QEMU can't drive, and the PL011 belongs to Bluetooth, so the test copy of the device tree drops the Bluetooth node and swaps the two UARTs' aliases with `fdtput` (from `dtc`, Debian's `device-tree-compiler`), so the PL011 is `serial0` and `ttyAMA0`. The firmware never runs: QEMU loads the kernel, device tree and initramfs itself, and a debug shell on the serial console stands in for a login, since the image has none. Work on a copy, since the first boot changes it:
 
 ```bash
 xz -dk pimarchy-*.img.xz && mv pimarchy-*.img test.img
