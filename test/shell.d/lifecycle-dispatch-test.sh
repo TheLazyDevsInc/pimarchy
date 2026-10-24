@@ -10,29 +10,33 @@ trap 'rm -rf "$tmp"' EXIT
 
 operations=(provision-prepare provision-commit provision-verify reset-prepare reset-verify reset-commit reset-rollback update-verify update-takeover luks-slots setup-boot)
 apple_optional=()
+# The Pi's boot package must ship these; it may leave out every other operation.
+rpi_required=(setup-boot update-verify)
 
-for platform in aarch64-apple aarch64 x86; do
+for platform in aarch64-apple aarch64-rpi aarch64 x86; do
   fake_platform "$tmp/$platform" "$platform"
 done
 mkdir -p "$tmp/contradiction/proc/device-tree"
 printf '%s\0' apple,j416c qcom,x1e80100 >"$tmp/contradiction/proc/device-tree/compatible"
 cp -r "$tmp/aarch64-apple/bin" "$tmp/contradiction/bin"
 
-# A root-owned directory of entrypoints stands in for the boot package; in a
-# fixture root the caller's own files count as root's.
+# A root-owned directory of entrypoints stands in for a boot package (the
+# Mac's unless another directory is named); in a fixture root the caller's own
+# files count as root's.
 implementation=usr/lib/omarchy/mac-boot
+rpi_implementation=usr/lib/omarchy/rpi-boot
 install_implementation() {
-  local root=$1 operation
+  local root=$1 dir=${2:-$implementation} operation
   rm -rf "$root"
-  mkdir -p "$root/$implementation"
+  mkdir -p "$root/$dir"
   for operation in "${operations[@]}"; do
-    cat >"$root/$implementation/$operation" <<SH
+    cat >"$root/$dir/$operation" <<SH
 #!/bin/bash
 { printf '%s' "$operation"; printf ' %q' "\$@"; echo; } >>"$tmp/ran"
 env >"$tmp/env"
 [[ ! -e $tmp/fail-with ]] || exit "\$(cat "$tmp/fail-with")"
 SH
-    chmod 755 "$root/$implementation/$operation"
+    chmod 755 "$root/$dir/$operation"
   done
   chmod -R go-w "$root"
 }
@@ -58,21 +62,25 @@ require_platform_fixtures "lifecycle dispatch on platform fixtures"
 
 full=$tmp/full
 install_implementation "$full"
+rpi_full=$tmp/rpi-full
+install_implementation "$rpi_full" "$rpi_implementation"
 empty=$tmp/empty
 mkdir -p "$empty"
 
 # x86 and plain aarch64 register no boot package: every operation
-# is a no-op there, even with Mac entrypoints on disk that would fail.
+# is a no-op there, even with Mac or Pi entrypoints on disk that would fail.
 echo 9 >"$tmp/fail-with"
 for platform in x86 aarch64; do
-  for operation in "${operations[@]}"; do
-    rm -f "$tmp/ran"
-    output=$(on "$platform" "$full" "$operation" --flag 2>&1) || fail "$platform: $operation is a no-op" "$output"
-    [[ -z $output && ! -e $tmp/ran ]] || fail "$platform: $operation runs nothing and says nothing" "$output"
-    output=$(on "$platform" "$full" --resolve "$operation" 2>&1) || fail "$platform: $operation resolves" "$output"
-    [[ -z $output ]] || fail "$platform: $operation resolves to nothing" "$output"
+  for root in "$full" "$rpi_full"; do
+    for operation in "${operations[@]}"; do
+      rm -f "$tmp/ran"
+      output=$(on "$platform" "$root" "$operation" --flag 2>&1) || fail "$platform: $operation is a no-op" "$output"
+      [[ -z $output && ! -e $tmp/ran ]] || fail "$platform: $operation runs nothing and says nothing" "$output"
+      output=$(on "$platform" "$root" --resolve "$operation" 2>&1) || fail "$platform: $operation resolves" "$output"
+      [[ -z $output ]] || fail "$platform: $operation resolves to nothing" "$output"
+    done
   done
-  pass "$platform: every operation is a no-op and no Mac entrypoint runs"
+  pass "$platform: every operation is a no-op and no Mac or Pi entrypoint runs"
 done
 rm -f "$tmp/fail-with"
 
@@ -171,6 +179,90 @@ chmod 755 "$full/$implementation/reset-verify"
 untrusted "a directory in place of an entrypoint" reset-verify
 pass "apple: an entrypoint that is not a root-owned file in root-owned directories never runs"
 
+# ── Raspberry Pi ─────────────────────────────────────────────────────────────
+
+# A Pi with omarchy-rpi-boot: each boot operation runs the package's entrypoint
+# with the caller's arguments, a cleared environment and a fixed PATH.
+install_implementation "$rpi_full" "$rpi_implementation"
+export CALLER_SECRET=leak
+for operation in "${operations[@]}"; do
+  rm -f "$tmp/ran"
+  on aarch64-rpi "$rpi_full" "$operation" first "second arg" || fail "pi: $operation runs its entrypoint"
+  [[ $(cat "$tmp/ran") == "$operation first second\\ arg" ]] || fail "pi: $operation passes its arguments" "$(cat "$tmp/ran")"
+  ! grep -q CALLER_SECRET "$tmp/env" || fail "pi: $operation does not pass the caller's environment" "$(cat "$tmp/env")"
+  grep -qx 'PATH=/usr/local/sbin:/usr/local/bin:/usr/bin' "$tmp/env" || fail "pi: $operation runs with a fixed PATH" "$(cat "$tmp/env")"
+  resolved=$(on aarch64-rpi "$rpi_full" --resolve "$operation") || fail "pi: $operation resolves"
+  [[ $resolved == "$rpi_full/$rpi_implementation/$operation" ]] || fail "pi: $operation resolves to its entrypoint" "$resolved"
+done
+unset CALLER_SECRET
+echo 7 >"$tmp/fail-with"
+status=0
+on aarch64-rpi "$rpi_full" update-verify || status=$?
+(( status == 7 )) || fail "pi: the entrypoint's exit status is the dispatcher's" "status: $status"
+rm -f "$tmp/fail-with"
+pass "pi: each boot operation runs omarchy-rpi-boot's entrypoint with its arguments and status"
+
+# A Pi without omarchy-rpi-boot, with only the Mac's packages on disk:
+# setup-boot and update-verify fail naming the package and entrypoint, every
+# other operation is a no-op, and nothing of the Mac's runs.
+echo 9 >"$tmp/fail-with"
+for operation in "${operations[@]}"; do
+  rm -f "$tmp/ran"
+  status=0
+  output=$(on aarch64-rpi "$full" "$operation" 2>&1) || status=$?
+  [[ ! -e $tmp/ran ]] || fail "pi: $operation never runs the Mac's entrypoint"
+  if [[ " ${rpi_required[*]} " == *" $operation "* ]]; then
+    (( status == 3 )) || fail "pi: required $operation fails with status 3 without the boot package" "status: $status"
+    [[ $output == "Error: $operation on aarch64-rpi needs omarchy-rpi-boot, which provides /usr/lib/omarchy/rpi-boot/$operation; it is not installed" ]] ||
+      fail "pi: required $operation names the missing package and entrypoint" "$output"
+    status=0
+    on aarch64-rpi "$full" --resolve "$operation" >/dev/null 2>&1 || status=$?
+    (( status == 3 )) || fail "pi: required $operation does not resolve without the boot package" "status: $status"
+  else
+    (( status == 0 )) && [[ -z $output ]] || fail "pi: optional $operation is a no-op without the boot package" "status $status: $output"
+    output=$(on aarch64-rpi "$full" --resolve "$operation" 2>&1) && [[ -z $output ]] ||
+      fail "pi: optional $operation resolves to nothing without the boot package" "$output"
+  fi
+done
+rm -f "$tmp/fail-with"
+pass "pi: without omarchy-rpi-boot setup-boot and update-verify fail with a clear message, the rest are no-ops, and no Mac entrypoint runs"
+
+# An installed omarchy-rpi-boot that predates a required operation is named
+# with its version; one that leaves out an optional operation is a no-op there.
+rpi_older=$tmp/rpi-older
+mkdir -p "$rpi_older/$rpi_implementation" "$rpi_older/var/lib/pacman/local/omarchy-rpi-boot-1.r1200.g0157bf6-1"
+for operation in "${operations[@]}"; do
+  status=0
+  output=$(on aarch64-rpi "$rpi_older" "$operation" 2>&1) || status=$?
+  if [[ " ${rpi_required[*]} " == *" $operation "* ]]; then
+    (( status == 1 )) && [[ $output == "Error: $operation on aarch64-rpi needs /usr/lib/omarchy/rpi-boot/$operation, which omarchy-rpi-boot 1.r1200.g0157bf6-1 does not provide; update omarchy-rpi-boot" ]] ||
+      fail "pi: an omarchy-rpi-boot without $operation is named with its version" "status $status: $output"
+  else
+    (( status == 0 )) && [[ -z $output ]] || fail "pi: an omarchy-rpi-boot without optional $operation leaves it a no-op" "status $status: $output"
+  fi
+done
+pass "pi: an installed omarchy-rpi-boot that lacks setup-boot or update-verify fails asking for its update"
+
+# The Mac never runs the Pi's entrypoints, and an untrusted Pi entrypoint never
+# runs, required or optional.
+for operation in "${operations[@]}"; do
+  rm -f "$tmp/ran"
+  status=0
+  on aarch64-apple "$rpi_full" "$operation" >/dev/null 2>&1 || status=$?
+  (( status == 3 )) && [[ ! -e $tmp/ran ]] || fail "apple: $operation never runs omarchy-rpi-boot's entrypoint" "status: $status"
+done
+for operation in setup-boot provision-commit; do
+  install_implementation "$rpi_full" "$rpi_implementation"
+  chmod o+w "$rpi_full/$rpi_implementation/$operation"
+  rm -f "$tmp/ran"
+  if output=$(on aarch64-rpi "$rpi_full" "$operation" 2>&1); then
+    fail "pi: a world-writable $operation is refused"
+  fi
+  [[ ! -e $tmp/ran && $output == *"refusing /usr/lib/omarchy/rpi-boot/$operation"* ]] || fail "pi: a world-writable $operation never runs" "$output"
+done
+install_implementation "$rpi_full" "$rpi_implementation"
+pass "pi: the Mac never runs the Pi's entrypoints, and an untrusted Pi entrypoint never runs"
+
 install_implementation "$full"
 for arguments in "" "unknown-operation" "--resolve" "--resolve unknown-operation"; do
   rm -f "$tmp/ran"
@@ -257,7 +349,7 @@ rm -rf "$boot_only"
 install_setup "$boot_only" "$implementation"
 
 echo 9 >"$tmp/fail-with"
-for platform in x86 aarch64; do
+for platform in x86 aarch64 aarch64-rpi; do
   for operation in "${setup_operations[@]}"; do
     rm -f "$tmp/ran"
     output=$(on "$platform" "$with_mac" "$operation" 2>&1) && [[ -z $output && ! -e $tmp/ran ]] ||
@@ -267,7 +359,28 @@ for platform in x86 aarch64; do
   done
 done
 rm -f "$tmp/fail-with"
-pass "x86 and plain aarch64: setup and app-install operations are no-ops, even with Mac entrypoints on disk"
+pass "x86, plain aarch64 and the Pi: setup and app-install operations are no-ops, even with Mac entrypoints on disk"
+
+# A Pi registers no user operations, so they stay no-ops even with entrypoints
+# in omarchy-rpi-boot's directory; setup-system is that package's, optional.
+rpi_setup=$tmp/rpi-setup
+rm -rf "$rpi_setup"
+install_setup "$rpi_setup" "$rpi_implementation"
+echo 9 >"$tmp/fail-with"
+for operation in "${user_operations[@]}"; do
+  rm -f "$tmp/ran"
+  output=$(on aarch64-rpi "$rpi_setup" "$operation" 2>&1) && [[ -z $output && ! -e $tmp/ran ]] ||
+    fail "pi: $operation is a no-op, even with an entrypoint on disk" "$output"
+  output=$(on aarch64-rpi "$rpi_setup" --resolve "$operation" 2>&1) && [[ -z $output ]] ||
+    fail "pi: $operation resolves to nothing" "$output"
+done
+rm -f "$tmp/fail-with"
+resolved=$(on aarch64-rpi "$rpi_setup" --resolve setup-system) && [[ $resolved == "$rpi_setup/$rpi_implementation/setup-system" ]] ||
+  fail "pi: setup-system resolves in omarchy-rpi-boot's directory" "$resolved"
+rm -f "$tmp/ran"
+on aarch64-rpi "$rpi_setup" setup-system image-first-boot && [[ $(cat "$tmp/ran") == "setup-system image-first-boot" ]] ||
+  fail "pi: setup-system runs omarchy-rpi-boot's entrypoint with its argument"
+pass "pi: the user operations are no-ops even with entrypoints on disk, and setup-system is omarchy-rpi-boot's to ship"
 
 for operation in "${setup_operations[@]}"; do
   rm -f "$tmp/ran"
@@ -319,7 +432,7 @@ pass "apple: a setup entrypoint that fails the trust rules never runs"
 # installer run with sudo still finishes elsewhere. As root the dispatcher runs
 # the detector beside it, so each platform gets a copy beside a stub.
 if unshare --user --map-root-user true 2>/dev/null; then
-  for platform in aarch64-apple x86 aarch64; do
+  for platform in aarch64-apple aarch64-rpi x86 aarch64; do
     mkdir -p "$tmp/root-$platform"
     cp "$dispatch" "$tmp/root-$platform/"
     printf '#!/bin/bash\necho %s\n' "$platform" >"$tmp/root-$platform/omarchy-hw-platform"
@@ -340,7 +453,7 @@ if unshare --user --map-root-user true 2>/dev/null; then
       done
     done
   done
-  pass "setup-user, post-install and pre-remove refuse root on Apple Silicon, and are no-ops for root elsewhere"
+  pass "setup-user, post-install and pre-remove refuse root on Apple Silicon, and are no-ops for root elsewhere, the Pi included"
 else
   skip "no unprivileged user namespace; skipping the root refusal of the user operations"
 fi

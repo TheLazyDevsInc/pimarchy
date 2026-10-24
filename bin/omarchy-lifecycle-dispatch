@@ -100,6 +100,17 @@ fi
 # generic setup and installs. Moving an operation to required also changes
 # apple_optional in test/shell.d/lifecycle-dispatch-test.sh and the Apple column
 # and registration table in docs/lifecycle-dispatch.md.
+#
+# A Raspberry Pi's boot operations belong to omarchy-rpi-boot (pi/rpi-boot). Its
+# firmware boots linux-rpi from the config.txt and cmdline.txt on a FAT
+# partition, which nothing else sets up (setup-boot), and nothing else checks
+# that an update left an initramfs for the installed kernel there
+# (update-verify), so those two are required. Every other operation is optional:
+# provisioning, factory reset and update takeovers keep their generic path,
+# which handles the Pi's unencrypted ext4 root. A Pi has no runtime package, so
+# the user operations stay unregistered, no-ops for root too, as on x86. Moving
+# an operation to required also changes rpi_required in the test and the Pi
+# column and registration table in the doc.
 case $platform:$operation in
   aarch64-apple:setup-system | aarch64-apple:setup-user | aarch64-apple:post-install | aarch64-apple:pre-remove)
     implementation=/usr/lib/omarchy/mac
@@ -116,6 +127,14 @@ case $platform:$operation in
       luks-slots
       setup-boot
     )
+    ;;
+  aarch64-rpi:setup-user | aarch64-rpi:post-install | aarch64-rpi:pre-remove)
+    exit 0
+    ;;
+  aarch64-rpi:*)
+    implementation=/usr/lib/omarchy/rpi-boot
+    package=omarchy-rpi-boot
+    required=(setup-boot update-verify)
     ;;
   *)
     exit 0
