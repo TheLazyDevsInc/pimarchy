@@ -288,6 +288,16 @@ cmp -s "$root/boot/cmdline.txt.omarchy-backup" "$alarm/cmdline.txt" && cmp -s "$
   fail "a later edit keeps the first backup"
 pass "setup-boot is idempotent, puts back what it sets, and keeps the first backups and a current initramfs"
 
+# While an image's first-boot flag is there, the initramfs hook owns root=:
+# setup-boot keeps the UUID it names, and the flag.
+reset_root
+echo "root=UUID=93f96c19-8612-4030-98f1-3533322a5222 rw rootwait console=tty1 pimarchy.new_disk_id" >"$root/boot/cmdline.txt"
+on aarch64-rpi setup-boot >/dev/null || fail "setup-boot runs on a first-boot cmdline.txt"
+[[ " $(<"$root/boot/cmdline.txt") " == *" root=UUID=93f96c19-8612-4030-98f1-3533322a5222 "*" pimarchy.new_disk_id "* &&
+  $(<"$root/boot/cmdline.txt") != *PARTUUID* ]] ||
+  fail "setup-boot leaves root= to the disk identifier hook while its flag is there" "$(<"$root/boot/cmdline.txt")"
+pass "setup-boot leaves root= to the disk identifier hook while its first-boot flag is there"
+
 # An owner's own tokens stay where they are, a default whose name is already
 # there keeps its value, root= is replaced once, and tty1 moves after the serial
 # console.
@@ -728,4 +738,20 @@ else
   [[ $(<"$tmp/cmdline.txt") == "root=PARTUUID=1234abcd-02 rw rootwait console=tty1 quiet splash" && ! -e $tmp/cmdline.txt.omarchy-new ]] ||
     fail "cmdline.txt names the root by its new PARTUUID and drops the first-boot flag" "$(<"$tmp/cmdline.txt")"
   pass "fstab's / and /boot and cmdline.txt's root follow the new identifier, and the first-boot flag goes"
+
+  # When fstab can't follow, the late hook writes the old identifier back, so
+  # systemd still finds /boot, and leaves cmdline.txt for the next boot.
+  printf 'root=UUID=93f96c19 rw pimarchy.new_disk_id\n' >"$tmp/cmdline.txt"
+  output=$(PATH="$idbin:$PATH" bash -c '
+    source "$1"
+    mountpoint() { return 1; }
+    err() { echo "ERROR: $*"; }
+    omarchy_rpi_disk=$2 omarchy_rpi_old_id=$(omarchy_rpi_disk_id "$2") omarchy_rpi_new_id=0badcafe omarchy_rpi_boot=/nonexistent
+    omarchy_rpi_set_disk_id "$2" 0badcafe
+    run_latehook
+  ' bash "$scripts/initcpio-hook" "$disk" 2>&1) || fail "the late hook copes with a root it can't update" "$output"
+  [[ $(sfdisk --dump "$disk" | sed -n 's/^label-id: //p') == "0x$new" && $output == *"keeps its identifier"* &&
+    $(<"$tmp/cmdline.txt") == "root=UUID=93f96c19 rw pimarchy.new_disk_id" ]] ||
+    fail "a new identifier fstab can't follow goes back, and cmdline.txt keeps the flag" "$output $(sfdisk --dump "$disk" | grep label-id)"
+  pass "a new identifier fstab can't follow goes back to the old one, and the next boot tries again"
 fi
