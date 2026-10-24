@@ -78,8 +78,10 @@ mkdir -p "$PKGDEST"
 printf 'pkgname = %s\npkgver = %s-%s\n' "$pkgname" "$pkgver" "$pkgrel" >"$PKGDEST/$pkgname-$pkgver-$pkgrel-aarch64$PKGEXT"
 STUB
 # repo-add keeps its database the way the real one does, one <name>-<version>/desc
-# entry per package, and with --remove deletes a replaced package's file. With
-# no packages it writes an empty database; either way it links pimarchy.db.
+# entry per package, and with --remove deletes a replaced package's file as it
+# replaces the entry, before it writes the database. With no packages it writes
+# an empty database; either way it links pimarchy.db. A test can make it fail
+# where the real one writes its database, after everything before that.
 cat >"$stubs/repo-add" <<'STUB'
 #!/bin/bash
 printf 'repo-add %s\n' "$*" >>"$RPI_TEST_LOG"
@@ -93,7 +95,6 @@ for arg in "$@"; do
     *) args+=("$arg") ;;
   esac
 done
-[[ ${RPI_TEST_FAIL_REPO_ADD:-0} != 1 ]] || exit 1
 db=${args[0]}
 dir=${db%/*}
 [[ -d $dir ]] || exit 93
@@ -114,6 +115,10 @@ for package in "${args[@]:1}"; do
   mkdir -p "$entries/$name-$version"
   printf '%%FILENAME%%\n%s\n\n%%NAME%%\n%s\n\n%%VERSION%%\n%s\n' "$file" "$name" "$version" >"$entries/$name-$version/desc"
 done
+if [[ ${RPI_TEST_FAIL_REPO_ADD:-0} == 1 ]]; then
+  rm -rf "$entries"
+  exit 1
+fi
 tar -czf "$db.tmp" -C "$entries" .
 mv "$db.tmp" "$db"
 ln -sfn "${db##*/}" "$dir/pimarchy.db"
@@ -292,8 +297,8 @@ for package in $expected_packages; do
   [[ -f $repo/$package-aarch64.pkg.tar.zst && $(stat -c %a "$repo/$package-aarch64.pkg.tar.zst") == 644 ]] ||
     fail "$package is published, readable by pacman's download user" "$(ls -la "$repo")"
 done
-grep -q "^sudo repo-add --remove --quiet $repo/pimarchy.db.tar.gz $repo/omarchy-settings-" "$log" ||
-  fail "repo-add publishes them and removes what they replace" "$(output)"
+grep -q "^sudo repo-add .*$repo/pimarchy.db.tar.gz $repo/omarchy-settings-" "$log" ||
+  fail "repo-add publishes them" "$(output)"
 [[ $(<"$repo/.built-commit") == "$("$real_git" -C "$src" rev-parse HEAD)" ]] || fail "the built commit is recorded"
 [[ -z $(ls -A "$scratch") ]] || fail "the build directory is removed" "$(ls -la "$scratch")"
 pass "the builds are published to the repository, the commit recorded and the build directory removed"
@@ -343,8 +348,10 @@ grep -q "Building omarchy failed" "$test_tmp/out" || fail "the failed package is
 pass "a failed build leaves the repository and the recorded commit untouched, and cleans up"
 
 if RPI_TEST_FAIL_REPO_ADD=1 run; then fail "a failed publish fails the run"; fi
-[[ $(repo_state) == "$before" ]] || fail "a failed publish removes the packages it copied" "$(diff <(echo "$before") <(repo_state))"
-pass "a publish repo-add refuses leaves the repository as it was"
+grep -q "Could not publish the packages" "$test_tmp/out" || fail "a failed publish says so" "$(output)"
+[[ $(repo_state) == "$before" ]] ||
+  fail "a failed publish removes the packages it copied and keeps every published one" "$(diff <(echo "$before") <(repo_state))"
+pass "a publish repo-add fails as it writes its database leaves the repository as it was, the builds it replaces included"
 
 run || fail "the next run after a failure builds" "$(output)"
 expect_versions

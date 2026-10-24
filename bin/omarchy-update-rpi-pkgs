@@ -313,21 +313,47 @@ for pkg in "${packages[@]}"; do
   built_files+=("${files[@]}")
 done
 
+# A published file is never written over: pacman may have it cached, and
+# refuses other bytes under the same name. The serial gives every build new
+# names, so this only stops what would break that.
 repo_files=()
-added=()
 for file in "${built_files[@]}"; do
+  [[ ! -e $repo/${file##*/} ]] || die "$repo already has ${file##*/}, and a published package is never replaced. $repo is unchanged."
   repo_files+=("$repo/${file##*/}")
-  [[ -e $repo/${file##*/} ]] || added+=("$repo/${file##*/}")
 done
 
+# Nothing published goes until the database has stopped listing it. repo-add
+# --remove deletes each replaced file before it writes the database, so a
+# repo-add that failed after that would leave the database listing files that
+# are gone; the replaced files go here instead, once it has succeeded.
 echo "Publish them to $repo"
-as_root install -m 0644 -- "${built_files[@]}" "$repo/"
-# --remove deletes each package's previous file once the database drops it.
-if ! as_root repo-add --remove --quiet "$db" "${repo_files[@]}"; then
-  if (( ${#added[@]} > 0 )); then
-    as_root rm -f -- "${added[@]}"
-  fi
-  die "repo-add could not publish the packages. $repo is unchanged."
+if ! as_root install -m 0644 -- "${built_files[@]}" "$repo/" ||
+  ! as_root repo-add --quiet "$db" "${repo_files[@]}"; then
+  as_root rm -f -- "${repo_files[@]}"
+  die "Could not publish the packages. $repo is unchanged."
 fi
 as_root tee "$built_commit" >/dev/null <<<"$head"
+
+# The builds the new ones replace, and whatever an interrupted publish left:
+# every file of these packages but the new ones.
+declare -A is_package=() is_new=()
+for pkg in "${packages[@]}"; do
+  is_package[$pkg]=1
+done
+for file in "${repo_files[@]}"; do
+  is_new[$file]=1
+done
+superseded=()
+for file in "$repo"/*.pkg.tar.*; do
+  # <name>-<pkgver>-<pkgrel>-<arch>.pkg.tar.<ext>, where only the name holds hyphens.
+  name=${file##*/}
+  name=${name%.pkg.tar.*}
+  name=${name%-*-*-*}
+  if [[ -f $file && -n $name && -n ${is_package[$name]:-} && -z ${is_new[$file]:-} ]]; then
+    superseded+=("$file")
+  fi
+done
+if (( ${#superseded[@]} > 0 )); then
+  as_root rm -f -- "${superseded[@]}" || warn "Could not remove the builds the new ones replace from $repo."
+fi
 echo "Omarchy's Raspberry Pi packages are built from $short."
