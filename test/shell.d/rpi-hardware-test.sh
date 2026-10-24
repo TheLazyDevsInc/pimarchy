@@ -113,3 +113,32 @@ TEST_LSPCI='00:02.0 VGA compatible controller: Intel Corporation Device 7d55' ru
 grep -Fxq vulkan-broadcom <(sed -e 's/[[:space:]]*#.*$//' "$ROOT/install/omarchy-aarch64-rpi.packages") ||
   fail "the Pi package list carries vulkan-broadcom, so an image's first boot installs nothing"
 pass "a Pi installs vulkan-broadcom, and other machines keep their drivers"
+
+# GDK scale: only the shipped 2, only on a Pi.
+gdk_setup="$ROOT/install/user/hardware/rpi/gdk-scale.sh"
+check_leaf user/hardware/rpi/gdk-scale.sh "$user_all"
+run_gdk() {
+  local machine=$1
+  run "$machine" env HOME="$scratch/home/$machine" bash -euo pipefail -c 'source "$1"' bash "$gdk_setup" >/dev/null
+}
+for machine in pi400 arm x86; do
+  mkdir -p "$scratch/home/$machine/.config/hypr"
+  cp "$ROOT/config/hypr/monitors.lua" "$scratch/home/$machine/.config/hypr/monitors.lua"
+  run_gdk "$machine"
+done
+monitors="$scratch/home/pi400/.config/hypr/monitors.lua"
+grep -qx 'local omarchy_gdk_scale = 1' "$monitors" || fail "a Pi's user gets GDK scale 1"
+diff <(sed 's/^local omarchy_gdk_scale = 1$/local omarchy_gdk_scale = 2/' "$monitors") "$ROOT/config/hypr/monitors.lua" >/dev/null ||
+  fail "only the GDK scale line changes"
+grep -qx 'local omarchy_monitor_scale = "auto"' "$monitors" || fail "the monitor scale stays auto"
+for machine in arm x86; do
+  cmp -s "$scratch/home/$machine/.config/hypr/monitors.lua" "$ROOT/config/hypr/monitors.lua" ||
+    fail "the $machine user's monitors.lua is untouched"
+done
+sed -i 's/^local omarchy_gdk_scale = 1$/local omarchy_gdk_scale = 3/' "$monitors"
+run_gdk pi400
+grep -qx 'local omarchy_gdk_scale = 3' "$monitors" || fail "a GDK scale the user chose stays"
+rm "$monitors"
+run_gdk pi400 || fail "a user without monitors.lua is left alone"
+[[ ! -e $monitors ]] || fail "the leaf creates no monitors.lua"
+pass "a Pi's user gets GDK scale 1 only over the shipped value"
