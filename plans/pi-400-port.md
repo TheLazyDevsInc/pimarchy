@@ -43,9 +43,9 @@ A Raspberry Pi 400 (BCM2711, Cortex-A72 ARMv8.0-A, 4 GB, VideoCore VI with vc4 K
 
 1. **Platform family.** Detector, predicate, package composer, manifest names, pacman routing, initramfs baseline (done in "Add the aarch64-rpi platform family").
 2. **Boot package and dispatch.** `pi/rpi-boot/{setup-boot,update-verify,grow-root}`, the unit, `pi/pkgbuilds/omarchy-rpi-boot`, the dispatcher registration, `docs/lifecycle-dispatch.md`, tests.
-3. **Hardware and guards.** `install/hardware/rpi/` leaves (Pi 400 headphone card off, suspend off, ALARM's networkd files retired), `vulkan.sh`, `install/config/snapper.sh`, `omarchy-refresh-limine`, `omarchy-kernel set`, the Direct Boot menu entry, `omarchy-update-firmware` (`rpi-eeprom-update` on a Pi), `omarchy-install-docker-dbs` (no MSSQL off x86, no MongoDB on ARMv8.0), `wf-recorder` for screen recording, GDK scale 1 for the Pi's user, tests.
+3. **Hardware and guards.** `install/hardware/rpi/` leaves (suspend off, ALARM's networkd files retired; the Pi 400's device tree already turns its headphone card off), `vulkan.sh`, `install/config/snapper.sh`, `omarchy-refresh-limine`, `omarchy-kernel set`, the Direct Boot menu entry, `omarchy-update-firmware` (`rpi-eeprom-update` on a Pi), `omarchy-install-docker-dbs` (no MSSQL off x86, no MongoDB on ARMv8.0), `wf-recorder` for screen recording, GDK scale 1 for the Pi's user, tests.
 4. **Packaging and updates.** Vendored PKGBUILDs, `omarchy-update-rpi-pkgs`, the Pi pacman templates, the update-pipeline step, tests.
-5. **Image builder.** `pi/build-image`: Arch Linux ARM's Pi rootfs, emulated with proot and qemu-user on an x86_64 host, turned into a Pimarchy root through the same entry points an ISO install uses, then packed into a two-partition `.img.xz` without loop devices or mounts.
+5. **Image builder.** `pi/build-image`: Arch Linux ARM's Pi rootfs, run on an x86_64 host in a chroot through binfmt_misc and qemu-user (or under proot where binfmt_misc can't be registered), turned into a Pimarchy root through the same entry points an ISO install uses, then packed into a two-partition `.img.xz` without loop devices or lasting mounts.
 6. **Docs.** `docs/raspberry-pi.md` (reference), the "Omarchy on..." manual chapter, `pi/README.md` (build and flash).
 
 ## Rejected approaches
