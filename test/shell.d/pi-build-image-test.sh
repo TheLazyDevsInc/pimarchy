@@ -131,6 +131,15 @@ if [[ $(uname -m) != "aarch64" ]]; then
   output=$(prereq chroot) || status=$?
   (( status != 0 )) && [[ $output == *"needs binfmt_misc to run aarch64 binaries"* ]] ||
     fail "the chroot runner refuses a host whose binfmt_misc can't run aarch64 binaries in a chroot" "$output"
+  # Debian's registration names a *-binfmt-P link to qemu, which refuses to
+  # run under that name unless binfmt_misc starts it.
+  stub debian-qemu '[[ $0 == *-binfmt-P ]] && { echo "qemu: $0 has to be run using kernel binfmt-misc subsystem" >&2; exit 1; }; echo "qemu-aarch64 version 10.0.13 (Debian 1:10.0.13+ds-0+deb13u1)"'
+  mkdir -p "$stubs/libexec"
+  ln -sfn ../debian-qemu "$stubs/libexec/aarch64-binfmt-P"
+  binfmt_entry qemu-aarch64 OPF "$stubs/libexec/aarch64-binfmt-P"
+  output=$(prereq auto) || fail "auto takes the chroot runner with Debian's binfmt-P registration" "$output"
+  [[ $output == *"chosen: chroot"* && $output == *"version 10.0.13"* ]] ||
+    fail "auto takes the chroot runner with Debian's binfmt-P registration" "$output"
   stub old-qemu 'echo "qemu-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)"'
   binfmt_entry qemu-aarch64 POCF "$stubs/old-qemu"
   status=0

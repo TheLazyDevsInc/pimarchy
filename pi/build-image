@@ -340,7 +340,9 @@ check_prerequisites() {
       if [[ -z $binfmt_interpreter ]]; then
         problems+=("--runner chroot on this $machine host needs binfmt_misc to run aarch64 binaries through qemu-user with the fix-binary (F) flag (Arch: qemu-user-static-binfmt; Debian, Ubuntu: qemu-user-binfmt), or pass --runner proot")
       else
-        qemu_bin=$binfmt_interpreter
+        # Debian registers qemu under a *-binfmt-P link, which refuses to run
+        # unless binfmt_misc starts it; its target answers for itself.
+        qemu_bin=$(readlink -f -- "$binfmt_interpreter") || qemu_bin=$binfmt_interpreter
         qemu_problems "$qemu_bin"
       fi
     else
