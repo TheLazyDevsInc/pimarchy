@@ -103,6 +103,27 @@ If a step fails, the build stops there and names the step. Rerun it with `--keep
 
 Under the proot runner, a few pacman runs in a hundred die of a heap corruption abort ("double free or corruption"), most of them as they exit; the same pacman under qemu alone does not. The builder runs a crashed pacman or gpg again, runs a failed multi-program step (Omarchy's system setup, the package builds, mkinitcpio) once more, and makes sure the build keyring trusts the keys it needs. A crash inside a package's install script is only reported by pacman, so a build that saw any crash says so at the end; its log shows what each crashed program was doing.
 
+### Booting an image under QEMU
+
+QEMU 9.0 and newer emulate the Pi 4's SoC as the `raspi4b` machine, which is enough to run an image's first boot without a Pi: the root grows, the deferred hardware setup runs, the initramfs is rebuilt and the owner wizard starts on tty1. QEMU emulates no GPU, USB, network, Wi-Fi or Bluetooth for this board, so Hyprland never starts, and its SD card must be a power of two in size. Ubuntu 24.04's QEMU is 8.2, so build QEMU 10 with `./configure --target-list=aarch64-softmmu` there.
+
+The Pi's console is the mini UART, which QEMU can't drive, and the PL011 belongs to Bluetooth, so the test copy of the device tree drops the Bluetooth node and swaps the two UARTs' aliases, so the PL011 is `serial0` and `ttyAMA0`. The firmware never runs: QEMU loads the kernel, device tree and initramfs itself, and a debug shell on the serial console stands in for a login, since the image has none. Work on a copy, since the first boot changes it:
+
+```bash
+xz -dk pimarchy-*.img.xz && mv pimarchy-*.img test.img
+truncate -s 16G test.img
+for file in kernel8.img bcm2711-rpi-400.dtb initramfs-linux.img; do mcopy -i test.img@@1M ::$file .; done
+fdtput -r bcm2711-rpi-400.dtb /soc/serial@7e201000/bluetooth
+fdtput -t s bcm2711-rpi-400.dtb /aliases serial0 /soc/serial@7e201000
+fdtput -t s bcm2711-rpi-400.dtb /aliases serial1 /soc/serial@7e215040
+qemu-system-aarch64 -M raspi4b -nographic -serial mon:stdio \
+  -kernel kernel8.img -dtb bcm2711-rpi-400.dtb -initrd initramfs-linux.img \
+  -drive file=test.img,if=sd,format=raw \
+  -append "root=PARTUUID=$(sfdisk --dump test.img | sed -n 's/^label-id: 0x//p')-02 rw rootwait console=ttyAMA0,115200 systemd.debug_shell=ttyAMA0 systemd.mask=serial-getty@ttyAMA0.service"
+```
+
+The first boot takes about fifteen minutes under emulation on an x86_64 host. `journalctl -u omarchy-rpi-grow-root -u omarchy-provision-hardware` in the debug shell shows what it did, and `omarchy-lifecycle-dispatch update-verify` checks the boot files. `systemctl poweroff` halts the board, since QEMU can't cut its power; quit QEMU with Ctrl-A X once it has. To boot the result again, copy the initramfs the first boot rebuilt out of the image (`mcopy -o -i test.img@@1M ::initramfs-linux.img .`) first.
+
 ## Flashing
 
 Check the image, find the SD card's device (`lsblk` lists it, `/dev/sdX` or `/dev/mmcblkX`), and write the image to the whole card, not to a partition:
