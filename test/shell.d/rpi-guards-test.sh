@@ -98,6 +98,10 @@ cat >"$stub_bin/rpi-eeprom-update" <<'SH'
 stdin=$(readlink /proc/$$/fd/0)
 printf 'rpi-eeprom-update %s stdin=%s\n' "$*" "$stdin" >>"$CALL_LOG"
 if [[ $* == "-a" ]]; then
+  if [[ ${TEST_EEPROM_FROZEN:-0} == "1" ]]; then
+    echo "EEPROM version is frozen. Skipping automatic update"
+    exit 3
+  fi
   echo "*** PREPARING EEPROM UPDATES ***"
   exit 0
 fi
@@ -117,6 +121,12 @@ grep -Fxq 'sudo rpi-eeprom-update -a' "$CALL_LOG" || fail "an available update i
 grep -Fxq 'omarchy-state set reboot-required' "$CALL_LOG" || fail "a staged update asks for a reboot"
 [[ $output == *"Restart the computer to apply it."* ]] || fail "the Pi is told a reboot applies the update" "$output"
 ! grep -q '^fwupdmgr ' "$CALL_LOG" || fail "a Pi never reaches fwupd"
+
+# A frozen bootloader version still reports the update, and -a refuses it.
+output=$(TEST_EEPROM_STATUS=1 TEST_EEPROM_FROZEN=1 run pi400 "$ROOT/bin/omarchy-update-firmware" <"$ROOT/version") ||
+  fail "a Pi whose bootloader version is frozen is a success"
+[[ $output == *"The bootloader version is frozen, so no update was applied."* ]] || fail "a frozen bootloader says nothing was applied" "$output"
+! grep -q '^omarchy-state ' "$CALL_LOG" || fail "a frozen bootloader asks for no reboot" "$(<"$CALL_LOG")"
 
 if TEST_EEPROM_STATUS=2 run pi400 "$ROOT/bin/omarchy-update-firmware" >/dev/null; then
   fail "a failed bootloader check fails the update"
