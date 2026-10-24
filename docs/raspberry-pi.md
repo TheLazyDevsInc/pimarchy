@@ -44,12 +44,12 @@ The Pi registers a platform boot package with `omarchy-lifecycle-dispatch`, as A
 
 ## Hardware setup
 
-`install/hardware/rpi/` holds the Pi's leaves, each gated on the family or the Pi 400:
+The Pi's own setup is small, and each piece lives where its kind of setup does:
 
-- **Sleep.** The BCM2711 has no suspend-to-RAM, so suspend and hibernation are turned off and the menu hides Suspend, as on the GB10.
-- **Network.** Arch Linux ARM's stock systemd-networkd DHCP files are retired, as other machines' are, so NetworkManager owns the interfaces.
-- **Vulkan.** v3d is a device-tree platform device that `lspci` never sees, so `vulkan.sh` installs `vulkan-broadcom` by platform.
-- **Display scale.** A Pi drives HDMI monitors at 1x, so the user's `GDK_SCALE` starts at 1 instead of the shipped 2.
+- **Sleep.** `install/hardware/rpi/sleep.sh`: `linux-rpi` has no suspend or hibernation and the BCM2711 has no PSCI firmware to suspend its cores, so the leaf turns every sleep state off for systemd, and the menu hides Suspend, as on the GB10.
+- **Network.** `install/hardware/network.sh`, the generic network leaf, retires Arch Linux ARM's stock systemd-networkd DHCP files (`en.network`, `eth.network`) on any machine, as it retires other distributions' stock files, so NetworkManager owns the interfaces. It only moves files that still hold the stock content.
+- **Vulkan.** v3d is a device-tree platform device that `lspci` never sees, so `install/hardware/vulkan.sh` installs `vulkan-broadcom` by platform.
+- **Display scale.** A Pi drives HDMI monitors at 1x, so user setup's `install/user/hardware/rpi/gdk-scale.sh` starts the user's `GDK_SCALE` at 1 instead of the shipped 2, and `omarchy-reinstall-configs` applies it again.
 
 What already works on a Pi without a branch of its own:
 
@@ -65,14 +65,14 @@ What already works on a Pi without a branch of its own:
 | --- | --- | --- |
 | Limine, UKIs, Direct Boot | Not available; `omarchy-refresh-limine` and `omarchy-kernel set` say so, and the menu hides Direct Boot | No UEFI; the firmware boots `kernel8.img` |
 | Snapshots | Skipped; `install/config/snapper.sh` does nothing without snapper and a btrfs root | ext4 root |
-| LUKS, hibernation, factory reset | Not available | v1 image has an unencrypted ext4 root and no swap |
+| LUKS, hibernation, factory reset | Not available | v1 image has an unencrypted ext4 root and no disk swap (only zram, which hibernation cannot use) |
 | Firmware updates | `omarchy-update-firmware` updates the bootloader EEPROM with `rpi-eeprom-update` instead of fwupd | fwupd has no Pi support |
 | Docker databases | MSSQL is offered on x86 only and MongoDB not on a Pi | No arm64 MSSQL image; MongoDB needs ARMv8.2-A, the Cortex-A72 is ARMv8.0 |
 | Windows VM, x86 games | Hidden, as on every aarch64 machine | x86-only |
 
 ## Images
 
-`pi/build-image` builds a flashable `pimarchy-*.img.xz` from Arch Linux ARM's Pi rootfs on an x86_64 or aarch64 host, without mounts or loop devices; [`pi/README.md`](../pi/README.md) covers running it and flashing the result. It follows the image-target contract every Omarchy image build uses: it writes the manifest naming `aarch64-rpi`, swaps U-Boot and `linux-aarch64` for `linux-rpi`, builds the local packages, installs the Pi's default set, runs `omarchy-apply-system --defer-provisioning --first-install` (which queues every hardware leaf for the first boot), writes the boot files for the image's own PARTUUIDs, arms owner provisioning, and seals the root.
+`pi/build-image` builds a flashable `pimarchy-*.img.xz` from Arch Linux ARM's Pi rootfs on an x86_64 or aarch64 host, without loop devices or lasting mounts: each command meant for the image runs in a chroot inside a private mount namespace, its aarch64 programs run through binfmt_misc and qemu-user on x86_64, or under proot where binfmt_misc can't be registered. [`pi/README.md`](../pi/README.md) covers running it and flashing the result. It follows the image-target contract every Omarchy image build uses: it writes the manifest naming `aarch64-rpi`, swaps U-Boot and `linux-aarch64` for `linux-rpi`, builds the local packages, installs the Pi's default set, runs `omarchy-apply-system --defer-provisioning --first-install` (which queues every hardware leaf for the first boot), writes the boot files for the image's own PARTUUIDs, arms owner provisioning, and seals the root.
 
 On first boot the root grows to fill the card, `omarchy-provision-hardware` creates the pacman keyring and runs the queued hardware leaves offline, the boot package's `setup-boot` settles the boot files and the initramfs is rebuilt on the device, and the owner wizard on tty1 asks for keyboard, account, hostname and timezone before logging into Hyprland once.
 
