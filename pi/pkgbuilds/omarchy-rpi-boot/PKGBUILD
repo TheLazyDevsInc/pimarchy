@@ -5,7 +5,7 @@
 #
 # Built on the Pi from its checkout, like this tree's omarchy and
 # omarchy-settings: OMARCHY_SRC=<checkout> makepkg. pkgver is the base the
-# builder extends with .r<commit count>.g<short sha> of that checkout, so every
+# builder extends with .r<serial>.g<short sha> of that checkout, so every
 # build of a newer commit sorts higher; keep pkgrel=1.
 pkgname=omarchy-rpi-boot
 pkgver=1

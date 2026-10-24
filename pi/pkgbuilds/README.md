@@ -7,7 +7,7 @@ A Raspberry Pi installs Omarchy's own packages from a local repository, `[pimarc
 
 ## How they are built
 
-`omarchy-update-rpi-pkgs` always builds with `OMARCHY_SRC` set to the checkout, so the vendored PKGBUILDs copy the tree they are part of and never fetch anything; their pinned `_tag`, `_commit`, `source` and `sha256sums` are upstream's release pins and go unused here. It builds a copy of each PKGBUILD whose `pkgver` is the vendored one plus `.r<commit count>.g<short sha>` of the checkout, as an unprivileged user with `makepkg --nodeps`, and publishes the results with `repo-add`.
+`omarchy-update-rpi-pkgs` always builds with `OMARCHY_SRC` set to the checkout, so the vendored PKGBUILDs copy the tree they are part of and never fetch anything; their pinned `_tag`, `_commit`, `source` and `sha256sums` are upstream's release pins and go unused here. It builds a copy of each PKGBUILD whose `pkgver` is the vendored one plus `.r<serial>.g<short sha>` of the checkout (the serial is the commit count, or one past the last build's when that is not lower), as an unprivileged user with `makepkg --nodeps`, and publishes the results with `repo-add`.
 
 `omarchy` depends on `omarchy-settings` of exactly its own version, so the two must keep the same `pkgver`; the build refuses to start when they differ.
 
