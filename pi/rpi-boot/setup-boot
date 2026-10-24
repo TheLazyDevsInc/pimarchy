@@ -146,8 +146,22 @@ has() {
 }
 
 # The first root= becomes the root partition's PARTUUID and later ones go, since
-# the kernel would take the last. console=tty1 is placed below.
+# the kernel would take the last. console=tty1 is placed below. While an image's
+# first-boot flag is there, root= stays as it is: the boot package's initramfs
+# hook is giving the disk a new identifier, and names the new PARTUUID itself
+# once fstab follows it.
 root_token=root=PARTUUID=$partuuid
+for token in "${tokens[@]}"; do
+  if [[ $token == "pimarchy.new_disk_id" ]]; then
+    for token in "${tokens[@]}"; do
+      if [[ $token == root=* ]]; then
+        root_token=$token
+        break
+      fi
+    done
+    break
+  fi
+done
 for token in "${tokens[@]}"; do
   if [[ $token == root=* ]]; then
     has root || out+=("$root_token")
