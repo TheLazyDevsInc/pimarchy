@@ -12,7 +12,10 @@ mkdir -p "$tmp_dir/bin" "$tmp_dir/state"
 cat >"$tmp_dir/bin/powerprofilesctl" <<'EOF'
 #!/bin/bash
 
-if [[ $1 == "list" ]]; then
+if [[ ${POWERPROFILES_DAEMON_DOWN:-0} == "1" ]]; then
+  echo "Failed to connect to power-profiles-daemon" >&2
+  exit 1
+elif [[ $1 == "list" ]]; then
   printf '  power-saver:\n* balanced:\n  performance:\n'
 elif [[ $1 == "set" ]]; then
   [[ ${POWERPROFILES_SET_FAIL:-0} == "0" ]] || exit 1
@@ -72,6 +75,18 @@ pass "power profile retains performance as AC default"
 "$ROOT/bin/omarchy-powerprofiles-init"
 [[ $(tail -n 1 "$tmp_dir/calls") == "power-saver" ]] || fail "init restores the autodetected preference"
 pass "power profile init restores the autodetected preference"
+
+# With power-profiles-daemon stopped, crashed or replaced (TLP), nothing is
+# listed and nothing can be set, so no call claims it set a profile.
+if output=$(POWERPROFILES_DAEMON_DOWN=1 "$ROOT/bin/omarchy-powerprofiles-set" ac performance 2>&1); then
+  fail "power profile reports an explicit request it cannot apply"
+fi
+[[ $output == "Power profile is not available: performance" ]] || fail "power profile says the requested profile is unavailable" "$output"
+[[ $(<"$tmp_dir/state/ac") == "power-saver" ]] || fail "power profile keeps the preference after an unavailable request"
+if POWERPROFILES_DAEMON_DOWN=1 "$ROOT/bin/omarchy-powerprofiles-set" >/dev/null 2>&1; then
+  fail "power profile autodetect reports that no profile could be set"
+fi
+pass "power profile fails explicit and autodetected requests without the daemon"
 
 rg -F '["omarchy-powerprofiles-set", pendingPowerSource]' "$ROOT/shell/plugins/services/battery/Service.qml" >/dev/null ||
   fail "battery service applies profiles through Omarchy command"
