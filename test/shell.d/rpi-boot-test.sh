@@ -174,6 +174,13 @@ for script in setup-boot update-verify grow-root; do
   (( status == 1 )) && [[ $output == *"this is not a Raspberry Pi"* ]] ||
     fail "$script refuses a machine that is not a Raspberry Pi" "status $status: $output"
 done
+# grow-root checks the platform before its marker, too.
+rm "$root/var/lib/pimarchy/grow-root-pending"
+status=0
+output=$(on x86 grow-root 2>&1) || status=$?
+(( status == 1 )) && [[ $output == *"this is not a Raspberry Pi"* ]] ||
+  fail "grow-root refuses a machine that is not a Raspberry Pi without its marker" "status $status: $output"
+touch "$root/var/lib/pimarchy/grow-root-pending"
 [[ $(fingerprint) == "$before" && ! -s $calls ]] || fail "nothing runs or changes off a Raspberry Pi" "$(cat "$calls")"
 pass "every Pi boot script refuses a machine that is not a Raspberry Pi, and changes nothing there"
 

@@ -18,9 +18,10 @@
 # boot tries again.
 #
 # systemd runs this as root, which may also run it directly, so it uses fixed
-# paths and checks the platform itself. An unprivileged test may name a fixture
-# root in OMARCHY_RPI_BOOT_ROOT, which prefixes the marker, and stub the tools on
-# its PATH; root ignores both, as omarchy-hw-platform does.
+# paths and checks the platform itself, before it reads anything else (its
+# marker included). An unprivileged test may name a fixture root in
+# OMARCHY_RPI_BOOT_ROOT, which prefixes the marker, and stub the tools on its
+# PATH; root ignores both, as omarchy-hw-platform does.
 if [[ $- != *p* ]]; then
   echo "Refusing an unsafe Bash startup." >&2
   exit 126
@@ -52,6 +53,8 @@ else
   is_rpi=omarchy-hw-aarch64-rpi
 fi
 
+"$is_rpi" || fail "grow-root grows a Raspberry Pi image's root partition, and this is not a Raspberry Pi"
+
 marker=$fixture/var/lib/pimarchy/grow-root-pending
 unit=omarchy-rpi-grow-root.service
 
@@ -59,8 +62,6 @@ if [[ ! -e $marker ]]; then
   echo "The root filesystem has already been grown"
   exit 0
 fi
-
-"$is_rpi" || fail "grow-root grows a Raspberry Pi image's root partition, and this is not a Raspberry Pi"
 
 # The marker goes first: without it the unit no longer runs, even if disabling
 # it fails.
