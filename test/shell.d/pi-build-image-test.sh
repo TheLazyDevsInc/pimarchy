@@ -251,6 +251,11 @@ else
     install -m 0755 /dev/null "$root/usr/lib/omarchy/rpi-boot/$file"
   done
   printf 'KERNEL_CMDLINE[default]="quiet splash"\n' >"$root/etc/limine-entry-tool.d/omarchy-defaults.conf"
+  mkdir -p "$root/usr/bin" "$root/var/lib/pacman/local/iptables-1:1.8.13-1"
+  printf '%%NAME%%\niptables\n\n%%VERSION%%\n1:1.8.13-1\n' >"$root/var/lib/pacman/local/iptables-1:1.8.13-1/desc"
+  for name in iptables ip6tables; do
+    ln -s xtables-nft-multi "$root/usr/bin/$name"
+  done
 
   # The checkout, the Pi's templates in it, and the pacman state built from it.
   checkout=$root$guest_src
@@ -352,6 +357,19 @@ else
   expect_problem "a root with a machine ID is refused" "/etc/machine-id is not empty"
   rm "$root/etc/ssh/ssh_host_ed25519_key"
   : >"$root/etc/machine-id"
+
+  # ufw's firewall setup sees an iptables that knows its version and nothing
+  # else, and the real links come back afterwards.
+  shim_iptables
+  [[ $("$root/usr/bin/ip6tables" -V) == "ip6tables v1.8.13 (nf_tables)" ]] && ! "$root/usr/bin/iptables" -L 2>/dev/null ||
+    fail "the build's iptables answers -V with the image's version and refuses the rest"
+  pass "the build's iptables answers -V with the image's version and refuses the rest"
+  expect_problem "a root that keeps the build's iptables shim is refused" "/usr/bin/iptables is not iptables' own link"
+  shim_iptables
+  unshim_iptables
+  [[ $(readlink "$root/usr/bin/iptables") == "xtables-nft-multi" && ! -e $root/usr/bin/iptables.pimarchy-build ]] ||
+    fail "a second shim keeps the real link, and unshimming restores it"
+  pass "a second shim keeps the real link, and unshimming restores it"
 
   mkdir -p "$root/usr/local/sbin"
   printf '#!/bin/sh\n' >"$root/usr/local/sbin/pacman"

@@ -1230,11 +1230,51 @@ scrub_alarm() {
 
 # ── 12. Omarchy system setup ─────────────────────────────────────────────────
 
+# ufw writes the firewall's rule files through install/config/firewall.sh, and
+# asks iptables for its version first. iptables-nft opens a netfilter netlink
+# socket even for -V, which qemu-user can't, and natively it would reach this
+# host's firewall: ufw's capability probe adds and removes test chains. For the
+# build, iptables and ip6tables answer -V with the installed version and refuse
+# everything else, so ufw writes the same rule files it writes on a Pi and
+# touches no kernel.
+shim_iptables() {
+  local tool version
+
+  version=$(sed -n '/^%VERSION%$/{n;p;q}' "$root"/var/lib/pacman/local/iptables-[0-9]*/desc 2>/dev/null)
+  version=${version#*:}
+  version=${version%-*}
+  [[ $version =~ ^[0-9][0-9.]*$ ]] || fail "cannot read the image's iptables version"
+  for tool in iptables ip6tables; do
+    [[ -e $root/usr/bin/$tool.pimarchy-build || -L $root/usr/bin/$tool.pimarchy-build ]] ||
+      mv -- "$root/usr/bin/$tool" "$root/usr/bin/$tool.pimarchy-build"
+    printf '%s\n' '#!/bin/bash' \
+      '# pi/build-image: the version alone, for ufw during the build; restored before sealing.' \
+      "if [[ \${1:-} == -V || \${1:-} == --version ]]; then echo '$tool v$version (nf_tables)'; exit 0; fi" \
+      'exit 1' >"$root/usr/bin/$tool"
+    chmod 0755 "$root/usr/bin/$tool"
+  done
+}
+
+unshim_iptables() {
+  local tool
+
+  for tool in iptables ip6tables; do
+    if [[ -e $root/usr/bin/$tool.pimarchy-build || -L $root/usr/bin/$tool.pimarchy-build ]]; then
+      mv -f -- "$root/usr/bin/$tool.pimarchy-build" "$root/usr/bin/$tool"
+    fi
+  done
+}
+
 apply_system() {
+  local status=0
+
+  shim_iptables
   retry_once guest env OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
     OMARCHY_MIRROR="$channel" OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log \
     OMARCHY_LOG_TO_STDOUT=1 MISE_OFFLINE=1 \
-    /usr/bin/omarchy-apply-system --defer-provisioning --first-install
+    /usr/bin/omarchy-apply-system --defer-provisioning --first-install || status=$?
+  unshim_iptables
+  return "$status"
 }
 
 # ── 13. Boot files ───────────────────────────────────────────────────────────
@@ -1513,6 +1553,10 @@ root_problems() (
   [[ $(readlink -- "$root/etc/resolv.conf") == "../run/systemd/resolve/stub-resolv.conf" ]] ||
     problem "/etc/resolv.conf does not point at systemd-resolved's stub"
   [[ ! -e $root/usr/local/sbin/pacman && ! -e $root/usr/local/sbin/findmnt ]] || problem "the build's command shims are still in the image"
+  for name in iptables ip6tables; do
+    [[ -L $root/usr/bin/$name && ! -e $root/usr/bin/$name.pimarchy-build && ! -L $root/usr/bin/$name.pimarchy-build ]] ||
+      problem "/usr/bin/$name is not iptables' own link, or the build's shim of it is left"
+  done
   [[ -z $(find "$root/var/cache/pacman/pkg" "$root/tmp" -mindepth 1 -print -quit) ]] || problem "the package cache or /tmp is not empty"
   [[ -f $root/etc/hostname && $(<"$root/etc/hostname") == "omarchy" ]] || problem "the hostname is not omarchy"
   [[ ! -L $root/etc/systemd/system/multi-user.target.wants/sshd.service ]] || problem "sshd is still enabled"
