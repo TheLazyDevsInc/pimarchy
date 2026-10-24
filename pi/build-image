@@ -49,6 +49,8 @@ guest_src=/var/lib/pimarchy/src
 guest_repo=/var/lib/pimarchy/repo
 guest_build=/var/tmp/pimarchy-build
 guest_scratch=/tmp/pimarchy-build
+# This host's device nodes the image's programs get (prepare_guest_dev).
+guest_dev_nodes=(null zero full random urandom tty)
 omarchy_key=40DFB630FF42BCFFB047046CF0134EE680CAC571
 alarm_key=68B3537F39A313B3E574D06777193F152BDBE6A6
 mkinitcpio_hook=90-mkinitcpio-install.hook
@@ -524,22 +526,52 @@ exit "$status"'
 # The chroot runner's mounts, made inside the private mount namespace unshare
 # gives each command, so none of them reaches this host's namespace and all of
 # them go when the command does: the root onto itself (pacman's CheckSpace looks
-# for the mount point of /), this host's /proc, /sys and /dev, its resolver
-# config over the image's placeholder, and the package cache. As under proot,
-# /run is the image's own, so the image doesn't look booted: systemctl works on
-# unit files and omarchy-hw-platform answers from the manifest.
+# for the mount point of /), this host's /proc, its /sys read-only and without
+# the file systems mounted under it (securityfs, efivarfs, cgroups), the build's
+# own /dev (see prepare_guest_dev) with a devpts and a /dev/shm of its own, its
+# resolver config over the image's placeholder, and the package cache. As under
+# proot, /run is the image's own, so the image doesn't look booted: systemctl
+# works on unit files and omarchy-hw-platform answers from the manifest.
 chroot_session='set -e
-mount=$1 chroot=$2 root=$3 cache=$4
-shift 4
+mount=$1 chroot=$2 root=$3 cache=$4 dev=$5 nodes=$6
+shift 6
 "$mount" --bind "$root" "$root"
 "$mount" --bind /proc "$root/proc"
-"$mount" --rbind /sys "$root/sys"
-"$mount" --rbind /dev "$root/dev"
+"$mount" --bind -o ro,nosuid,nodev,noexec /sys "$root/sys"
+"$mount" --bind "$dev" "$root/dev"
+for node in $nodes; do
+  "$mount" --bind "/dev/$node" "$root/dev/$node"
+done
+"$mount" -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5,nosuid,noexec devpts "$root/dev/pts"
+"$mount" -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$root/dev/shm"
 "$mount" --bind "$cache" "$root/var/cache/pacman/pkg"
 if [[ -e /etc/resolv.conf && -f $root/etc/resolv.conf && ! -L $root/etc/resolv.conf ]]; then
   "$mount" --bind /etc/resolv.conf "$root/etc/resolv.conf"
 fi
 exec "$chroot" "$root" "$@"'
+
+# The /dev the image's programs get, under either runner: a directory in the
+# work directory (proot can't mount a tmpfs), outside the image root, onto whose
+# placeholders the runner binds this host's null, zero, full, random, urandom
+# and tty, beside the links into /proc every /dev has, and pts and shm. Not this
+# host's own /dev: pacman's systemd-tmpfiles hook sets the owner and mode of
+# device nodes such as /dev/kvm and /dev/loop-control, with the image's group
+# IDs.
+prepare_guest_dev() {
+  local node
+
+  guest_dev=$work/dev
+  install -d -m 0755 "$guest_dev" "$guest_dev/pts"
+  install -d -m 1777 "$guest_dev/shm"
+  for node in "${guest_dev_nodes[@]}"; do
+    install -m 0644 /dev/null "$guest_dev/$node"
+  done
+  ln -s /proc/self/fd "$guest_dev/fd"
+  ln -s /proc/self/fd/0 "$guest_dev/stdin"
+  ln -s /proc/self/fd/1 "$guest_dev/stdout"
+  ln -s /proc/self/fd/2 "$guest_dev/stderr"
+  ln -s pts/ptmx "$guest_dev/ptmx"
+}
 
 # The environment inside the image: a clean one, plus this host's proxy
 # settings and, when this host names its own CA bundle (a TLS-inspecting
@@ -573,30 +605,35 @@ prepare_guest_env() {
 }
 
 # Runs a command inside the image root and returns its exit status, through the
-# chosen runner. Both give it this host's /proc, /dev and /sys and resolver
-# config (but not /run: the image must not look booted, so systemctl works on
-# unit files and omarchy-hw-platform answers from the manifest), and the package
-# cache, so downloads survive the run.
+# chosen runner. Both give it this host's /proc and /sys, the build's own /dev
+# (prepare_guest_dev) and this host's resolver config (but not /run: the image
+# must not look booted, so systemctl works on unit files and omarchy-hw-platform
+# answers from the manifest), and the package cache, so downloads survive the
+# run.
 #
 # The session records the command's status before it cleans up, since the
 # session's own shell can crash under emulation too, after the command is
 # done: proot then exits 255. A session that recorded nothing never finished
 # its command, and guest_session_lost says so.
 guest() {
-  local session status_file proot_status=0
+  local session status_file proot_status=0 node
   session=$(od -An -N8 -tx8 /dev/urandom | tr -d '[:space:]')
   status_file=$root$guest_scratch/status-$session
   local -a proot_command=(env -i "${guest_env[@]}" PIMARCHY_GUEST_SESSION="$session")
 
   if [[ $runner == "chroot" ]]; then
     proot_command+=("$unshare_bin" --mount --propagation private /bin/bash -c "$chroot_session" pimarchy-chroot
-      "$mount_bin" "$chroot_bin" "$root" "$package_cache")
+      "$mount_bin" "$chroot_bin" "$root" "$package_cache" "$guest_dev" "${guest_dev_nodes[*]}")
   else
     proot_command+=(PROOT_NO_SECCOMP=1 "$proot_bin")
     if [[ -n $qemu_bin ]]; then
       proot_command+=(-q "$qemu_bin")
     fi
-    proot_command+=(-r "$root" -b /proc -b /dev -b /sys)
+    # proot can't mount a devpts of the build's own, so ptys come from this host's.
+    proot_command+=(-r "$root" -b /proc -b /sys -b "$guest_dev:/dev" -b /dev/pts)
+    for node in "${guest_dev_nodes[@]}"; do
+      proot_command+=(-b "/dev/$node")
+    done
     if [[ -e /etc/resolv.conf ]]; then
       proot_command+=(-b /etc/resolv.conf)
     fi
@@ -860,6 +897,7 @@ prepare_root() {
 
   package_cache=$cache/pkg
   install -d -m 0755 "$package_cache"
+  prepare_guest_dev
   prepare_guest_env
 
   machine=$(guest uname -m) || fail "the $runner runner cannot run the image's programs"
