@@ -24,6 +24,8 @@ Its pacman templates, `default/pacman/aarch64-rpi/`, are the aarch64 ones (`[oma
 
 `omarchy-update-rpi-pkgs` keeps that repository current. `omarchy update` runs it on a Pi before the package transaction: it fast-forwards the checkout, and when the checkout moved it builds the three packages from `pi/pkgbuilds/` as the updating user, versioned `<PKGBUILD pkgver>.r<commits>.g<sha>`, and publishes them. With `--init` it only makes sure the repository exists, since pacman refuses to sync a `file://` repository without a database; everything that installs the Pi templates runs it first.
 
+The checkout and the repository belong to root, so the command reaches them through the update's sudo authorization, while makepkg runs as the user (as root, it builds as `SUDO_USER` or as `--as-user <user>`). It builds in a fresh directory under `/var/tmp`, since a Pi's `/tmp` is in RAM, and publishes only once all three packages built: a failed build stops the update and leaves the repository as it was. A checkout with local changes, or with local commits its upstream lacks, is built as it is, with a warning. A channel change on a Pi keeps this `omarchy` pair, since `[omarchy]`'s `-dev` pair for edge doesn't know the Pi.
+
 The `omarchy` and `omarchy-settings` PKGBUILDs in `pi/pkgbuilds/` are upstream's, vendored from `omacom/omarchy-pkgs`; `pi/pkgbuilds/README.md` records the source and any local change.
 
 ## Boot chain
