@@ -161,6 +161,27 @@ if [[ $(uname -m) != "aarch64" ]]; then
 fi
 pass "old proot, qemu and mke2fs, a FAT or noexec output, and an output under a private directory fail the prerequisite checks with a reason each"
 
+# ── The kernel swap ──────────────────────────────────────────────────────────
+
+# The family list names the Pi's boot package, which [pimarchy] only has once
+# the build has built it: the kernel swap installs the rest of the list.
+output=$(
+  root=$TMPDIR/swap-root
+  mkdir -p "$root$guest_src/install" "$root/boot"
+  printf 'linux-rpi\nraspberrypi-bootloader\n# The boot package\nomarchy-rpi-boot\nwf-recorder\n' >"$root$guest_src/install/omarchy-$platform.packages"
+  guest_retry() { :; }
+  guest_pacman() {
+    echo "pacman $*"
+    printf 'k' >"$root/boot/kernel8.img"
+    : >"$root/boot/config.txt"
+    : >"$root/boot/cmdline.txt"
+  }
+  swap_kernel 2>&1
+) || fail "the kernel swap installs the Pi's family list" "$output"
+[[ $output == *"pacman -Syu --needed linux-rpi raspberrypi-bootloader wf-recorder"* && $output != *omarchy-rpi-boot* ]] ||
+  fail "the kernel swap installs the family list but its local packages, which the build has not built yet" "$output"
+pass "the kernel swap installs the family list but its local packages, which the build has not built yet"
+
 # ── The image's checkout ─────────────────────────────────────────────────────
 
 if ! command -v git >/dev/null; then

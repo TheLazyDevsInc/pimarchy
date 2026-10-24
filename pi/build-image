@@ -1021,7 +1021,8 @@ setup_keyring() {
 # linux-rpi directly, and the two kernels conflict. The whole root is upgraded
 # in the same transaction, so nothing installed later meets older libraries.
 swap_kernel() {
-  local -a stock=() family=()
+  local -a stock=() family=() boot=()
+  local package
 
   mapfile -t stock < <(guest_retry pacman -Qq linux-aarch64 linux-aarch64-headers uboot-raspberrypi 2>/dev/null || true)
   if (( ${#stock[@]} )); then
@@ -1033,8 +1034,13 @@ swap_kernel() {
   mapfile -t family < <(filter_package_names "${family[@]}")
   [[ " ${family[*]} " == *" $kernel_package "* ]] ||
     fail "install/omarchy-$platform.packages does not name $kernel_package"
-  echo "Upgrading the root and installing ${family[*]}"
-  guest_pacman -Syu --needed "${family[@]}"
+  # The family's own local packages, such as the boot package, come from
+  # [pimarchy] once step 9 has built them, and step 10 installs them.
+  for package in "${family[@]}"; do
+    [[ " ${local_packages[*]} " == *" $package "* ]] || boot+=("$package")
+  done
+  echo "Upgrading the root and installing ${boot[*]}"
+  guest_pacman -Syu --needed "${boot[@]}"
 
   rm -f -- "$root"/boot/*.pacsave
   [[ -s $root/boot/kernel8.img && -f $root/boot/config.txt && -f $root/boot/cmdline.txt ]] ||
