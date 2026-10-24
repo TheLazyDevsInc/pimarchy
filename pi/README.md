@@ -51,7 +51,7 @@ The builder checks for all of these before it starts and says what is missing:
 
 - `bsdtar`, `mkfs.vfat` and `fsck.vfat`, `mcopy`, `mke2fs` and `e2fsck` (e2fsprogs 1.43 or newer), `sfdisk`, `findmnt`, `xz`, `git` and `curl`.
 - For the chroot runner, `unshare`, `mount` and `chroot`, and on an x86_64 host a static qemu-user 10 or newer registered with binfmt_misc for aarch64 with the fix-binary (`F`) flag. The kernel then opens qemu when it is registered, so it runs the image's programs inside a chroot that has no qemu of its own. The builder reads the registration from `/proc/sys/fs/binfmt_misc` and checks the qemu it names.
-- For the proot runner, proot 5.4 or newer, and on an x86_64 host qemu-user 10 or newer, found as `qemu-aarch64-static`, then `qemu-aarch64`. proot 5.1, which Ubuntu 24.04 still ships, does not translate the `faccessat2` system call that Arch Linux ARM's glibc uses, so tests inside the image look at the build host's files.
+- For the proot runner, proot 5.4 or newer, and on an x86_64 host qemu-user 10 or newer, found as `qemu-aarch64-static`, then `qemu-aarch64`. proot 5.1, which Ubuntu 24.04 and Debian 13 ship, does not translate the `faccessat2` system call that Arch Linux ARM's glibc uses, so tests inside the image look at the build host's files.
 - qemu 8.2, which Ubuntu 24.04 ships, crashes on Arch Linux ARM's glibc under either runner. No qemu is needed on an aarch64 host.
 
 On Arch Linux, `qemu-user-static-binfmt` registers its static qemu with the `F` flag through systemd-binfmt:
@@ -77,27 +77,37 @@ printf ':qemu-aarch64:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\
 sudo pi/build-image --output ~/pimarchy-image
 ```
 
-Where binfmt_misc can't be registered, as in an unprivileged container, use the proot runner with proot 5.4 from Debian 13 ([packages.debian.org/trixie/proot](https://packages.debian.org/trixie/proot)) and the qemu unpacked above, both first on the builder's `PATH`:
+Where binfmt_misc can't be registered, as in an unprivileged container, use the proot runner. It needs proot 5.4, which Debian has only in forky and sid ([packages.debian.org/sid/proot](https://packages.debian.org/sid/proot)) and Arch only in the AUR. Debian's build needs glibc 2.38, so it runs on Ubuntu 24.04, Debian 13 and newer. Under proot, the image's build account runs programs by their paths on this computer, so qemu (Debian 13's static `qemu-user`, as above), proot and `--output` must sit where other users can reach them (every directory above them searchable by others), not in a private home:
 
 ```bash
-dpkg-deb -x proot_5.4.0-*_amd64.deb ~/pimarchy-tools
+sudo mkdir -p /opt/pimarchy-tools
+sudo dpkg-deb -x proot_5.4.0-*_amd64.deb /opt/pimarchy-tools
+sudo dpkg-deb -x qemu-user_10.*_amd64.deb /opt/pimarchy-tools
 sudo apt install libtalloc2   # proot's one library
-sudo env PATH="$HOME/pimarchy-tools/usr/bin:$PATH" pi/build-image --runner proot --output ~/pimarchy-image
+sudo env PATH="/opt/pimarchy-tools/usr/bin:$PATH" pi/build-image --runner proot --output /srv/pimarchy-image
 ```
 
 ### What a build does
 
-Each step prints a numbered banner, and everything goes to `build.log`:
+Each step prints a numbered banner, `==> [n/17]`, and everything goes to `build.log`:
 
-1. It checks the prerequisites, resolves `--ref`, and makes sure the checkout has the Pi's pacman templates and PKGBUILDs.
-2. It downloads Arch Linux ARM's `ArchLinuxARM-rpi-aarch64-latest.tar.gz` (about 850 MB, checked against its `.md5`) and extracts it as root, so the image's files keep their real owners and modes. Arch Linux ARM serves both over plain HTTP. For a stronger check, verify the tarball's `.sig` against Arch Linux ARM's signing key yourself and pass it with `--tarball`.
-3. It writes the image-target manifest (`/var/lib/omarchy/image/target`, `platform=aarch64-rpi`), so everything that asks which computer this is gets the Pi's answer.
-4. It clones the checkout into `/var/lib/pimarchy/src`, installs the Pi's `pacman.conf` for the channel, creates a pacman keyring for the build, swaps `linux-aarch64` and U-Boot for `linux-rpi`, and upgrades the root.
-5. It builds `omarchy-settings`, `omarchy` and `omarchy-rpi-boot` from the clone as a temporary user, using the checkout's own `omarchy-update-rpi-pkgs`, and publishes them to `[pimarchy]`.
-6. It installs Omarchy the way the ISO does: `omarchy-settings` and the keyrings first, then LuaRocks, then the Neovim config, then `omarchy`, the boot package and the default set from `omarchy-pkg-defaults aarch64-rpi`.
-7. It removes Arch Linux ARM's `alarm` account, locks root, and turns off its SSH daemon and systemd-networkd setup. Then it runs `omarchy-apply-system --defer-provisioning --first-install`, which sets the system up and queues every hardware step for the first boot.
-8. It writes `cmdline.txt`, `config.txt` and `fstab` for the image's own partition IDs, using the boot package's `setup-boot`, and builds a generic initramfs. It then arms the first-boot root grower and owner setup.
-9. It seals the root: no keyring, machine ID, host keys, logs, caches or build tools are left. It then checks everything above before it packs the boot and root filesystems into the disk image without mounting anything.
+1. **Checking prerequisites**: the tools and their versions, the runner, and room where `--output` points.
+2. **Resolving the Pimarchy source**: the commit `--ref` names, the branch the image will follow, and that the checkout has the Pi's pacman templates and PKGBUILDs.
+3. **Fetching Arch Linux ARM's Raspberry Pi root filesystem**: `ArchLinuxARM-rpi-aarch64-latest.tar.gz` (about 850 MB, checked against its `.md5`). Arch Linux ARM serves both over plain HTTP. For a stronger check, verify the tarball's `.sig` against Arch Linux ARM's signing key yourself and pass it with `--tarball`.
+4. **Extracting the root filesystem**: as root, so the image's files keep their real owners and modes, then the image-target manifest (`/var/lib/omarchy/image/target`, `platform=aarch64-rpi`), so everything that asks which computer this is gets the Pi's answer.
+5. **Cloning the Pimarchy source into the image**: a blobless clone of the commit at `/var/lib/pimarchy/src`.
+6. **Setting up pacman**: the Pi's `pacman.conf` and mirrorlist for the channel, and the empty `[pimarchy]` repository.
+7. **Creating the build's pacman keyring**: Arch Linux ARM's keys, and Omarchy's signing key.
+8. **Swapping in the Raspberry Pi kernel**: `linux-aarch64` and U-Boot out, `linux-rpi`, the Pi's firmware and the rest of its family list in, the PipeWire audio stack the ISO installs, and the root upgraded.
+9. **Building Omarchy's packages into the local repository**: `omarchy-settings`, `omarchy` and `omarchy-rpi-boot` from the clone, built as a temporary user by the checkout's own `omarchy-update-rpi-pkgs` and published to `[pimarchy]`.
+10. **Installing Omarchy**: the way the ISO does, `omarchy-settings` and the keyrings first, then LuaRocks, then the Neovim config, then `omarchy`, the boot package and the default set from `omarchy-pkg-defaults aarch64-rpi`.
+11. **Removing Arch Linux ARM's account and network defaults**: the `alarm` account, root's password, and its SSH daemon and systemd-networkd setup.
+12. **Running Omarchy's system setup**: `omarchy-apply-system --defer-provisioning --first-install`, which sets the system up and queues every hardware step for the first boot.
+13. **Writing the boot files**: `cmdline.txt`, `config.txt` and `fstab` for the image's own partition IDs, through the boot package's `setup-boot`, and a generic initramfs.
+14. **Arming first-boot setup**: the root grower and owner setup.
+15. **Sealing the root filesystem**: no keyring, machine ID, host keys, logs, caches or build tools are left.
+16. **Validating the root filesystem**: everything above, checked before anything is packed.
+17. **Packing the image**: the boot and root filesystems written into the disk image without mounting anything, compressed and checksummed.
 
 If a step fails, the build stops there and names the step. Rerun it with `--keep-root` to look inside `DIR/work/root`. The cache keeps every download, so a rerun only repeats the work.
 
