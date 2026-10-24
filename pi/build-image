@@ -436,7 +436,9 @@ prepare_output() {
   root=$work/root
   log_file=$output/build.log
   : >"$log_file"
-  exec > >(tee -a "$log_file") 2>&1
+  # Ctrl-C (or a TERM sent to the whole build) reaches the logger too, which
+  # has to outlive the build to log how it ended; it ends when the build does.
+  exec > >(trap '' INT TERM; exec tee -a "$log_file") 2>&1
   build_started=$SECONDS
   echo "pi/build-image started $(date -u '+%Y-%m-%d %H:%M:%S UTC') on $(uname -n) ($(uname -m))"
 
@@ -460,6 +462,9 @@ cleanup() {
 
   set +e
   trap - EXIT
+  # A logger that is gone (killed by a signal sent to the whole build) must not
+  # stop the cleanup at its first message.
+  trap '' PIPE
   if (( status != 0 )) && [[ -n $step_name ]]; then
     echo "Error: the build failed in step $step_number ($step_name); see ${log_file:-the output above}" >&2
   fi
@@ -483,8 +488,10 @@ cleanup() {
 # running, so the session stops them before it returns: through gpgconf, and,
 # since gpgconf itself can crash under emulation, by the mark every process of
 # the session inherits (PIMARCHY_GUEST_SESSION, read from the host's /proc with
-# shell builtins alone).
+# shell builtins alone). Ctrl-C stops the command, not the session, which still
+# cleans up.
 guest_session='status=0
+trap : INT TERM
 "$@" || status=$?
 mkdir -p /tmp/pimarchy-build && printf "%s\n" "$status" >"/tmp/pimarchy-build/status-$PIMARCHY_GUEST_SESSION"
 if [[ -d /etc/pacman.d/gnupg ]]; then

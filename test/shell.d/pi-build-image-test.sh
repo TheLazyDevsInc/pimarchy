@@ -189,6 +189,31 @@ output=$(bash -c 'source "$1"; output=$2 cache=$2/cache; prepare_output' bash "$
   fail "a work directory the build did not make stops the build, and stays" "$output"
 pass "a work directory the build did not make stops the build, and stays"
 
+# Ctrl-C reaches the whole build, its logger included, and the build still logs
+# where it stopped. A background job starts with SIGINT ignored; a terminal's
+# foreground job does not.
+mkdir "$TMPDIR/stopped"
+setsid env --default-signal=INT bash -c '
+  source "$1"
+  require_root() { :; }
+  check_prerequisites() { echo "$$" >"$output/session"; sleep 60; }
+  main --output "$2" --cache "$2/cache"
+' bash "$BUILDER" "$TMPDIR/stopped" >/dev/null 2>&1 &
+build=$!
+for _ in {1..100}; do
+  [[ -s $TMPDIR/stopped/session ]] && break
+  sleep 0.1
+done
+kill -INT -- "-$(<"$TMPDIR/stopped/session")"
+wait "$build" || true
+for _ in {1..50}; do
+  grep -q 'failed in step 1' "$TMPDIR/stopped/build.log" && break
+  sleep 0.1
+done
+grep -q '^Error: the build failed in step 1 (Checking prerequisites)' "$TMPDIR/stopped/build.log" ||
+  fail "a build stopped with Ctrl-C logs the step it stopped in" "$(<"$TMPDIR/stopped/build.log")"
+pass "a build stopped with Ctrl-C logs the step it stopped in"
+
 # ── The kernel swap ──────────────────────────────────────────────────────────
 
 # The family list names the Pi's boot package, which [pimarchy] only has once
