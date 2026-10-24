@@ -25,6 +25,9 @@
 # the user sudo ran it for, or as the user --as-user names, through runuser.
 # The PKGBUILDs come from the root-owned checkout, the same code the packages
 # install, so building them while the update holds sudo trusts nothing new.
+# Nothing checks a signature on what the checkout fast-forwards to, though:
+# push access to the tracked branch of its origin is the Pi's root trust
+# anchor (docs/update-process.md).
 
 # -p keeps a root caller's environment from running code in this shell before
 # the first line (bash ignores BASH_ENV and exported functions), so a launch
