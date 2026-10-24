@@ -157,19 +157,26 @@ done
 pass "on aarch64 a dev checkout that can't keep the machine's repositories is rejected before linking"
 
 # The checkout's own refresh copies its own templates, so one without them for
-# this platform is refused before linking.
-template=$checkout/default/pacman/aarch64/mirrorlist-edge
-mv "$template" "$boundary_tmp/saved-template"
-reset_boundary
-if SUDO_TEST_PLATFORM=aarch64 run_channel dev; then fail "a dev checkout without its templates was accepted"; fi
-mv "$boundary_tmp/saved-template" "$template"
-if grep -Eq '^step:omarchy-(dev-link|state)|^step:pacman|^sudo -N ' "$SUDO_TEST_LOG"; then
-  fail "a dev checkout without its templates changed the system before rejection" "$(<"$SUDO_TEST_LOG")"
-fi
-grep -q "Update the checkout before switching to dev; it has no edge templates for aarch64" "$boundary_tmp/output" ||
-  fail "the rejection names the missing templates" "$(<"$boundary_tmp/output")"
-assert_boundary_cold "checkout without templates"
-pass "a dev checkout without its templates for the platform is rejected before linking"
+# this platform is refused before linking. Only Pimarchy has a Pi's, so there
+# the refusal asks for a Pimarchy checkout rather than a newer one.
+for platform in aarch64 aarch64-rpi; do
+  template=$checkout/default/pacman/$platform/mirrorlist-edge
+  mv "$template" "$boundary_tmp/saved-template"
+  reset_boundary
+  if SUDO_TEST_PLATFORM=$platform run_channel dev; then fail "$platform: a dev checkout without its templates was accepted"; fi
+  mv "$boundary_tmp/saved-template" "$template"
+  if grep -Eq '^step:omarchy-(dev-link|state)|^step:pacman|^sudo -N ' "$SUDO_TEST_LOG"; then
+    fail "$platform: a dev checkout without its templates changed the system before rejection" "$(<"$SUDO_TEST_LOG")"
+  fi
+  if [[ $platform == "aarch64-rpi" ]]; then
+    message="$checkout is not a Pimarchy checkout: it has no edge templates for aarch64-rpi"
+  else
+    message="Update the checkout before switching to dev; it has no edge templates for aarch64"
+  fi
+  grep -qF "$message" "$boundary_tmp/output" || fail "$platform: the rejection names the missing templates" "$(<"$boundary_tmp/output")"
+  assert_boundary_cold "$platform checkout without templates"
+done
+pass "a dev checkout without its templates for the platform is rejected before linking, on a Pi as not Pimarchy"
 
 reset_boundary
 OMARCHY_PATH="$SUDO_TEST_HOME/omarchy" run_channel stable || fail "leaving dev failed" "$(<"$boundary_tmp/output")"

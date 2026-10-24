@@ -8,11 +8,12 @@ source "$SHELL_TEST_DIR/fixtures/sudo-boundary-test.sh"
 test_tmp="$boundary_tmp"
 package_root="$SUDO_TEST_ROOT"
 copy_boundary_file bin/omarchy-channel-set
-python3 - "$SUDO_TEST_ROOT/bin/omarchy-channel-set" "$package_root" <<'PYTHON'
+# A Pi's own Pimarchy checkout is the fixture's too.
+python3 - "$SUDO_TEST_ROOT/bin/omarchy-channel-set" "$package_root" "$test_tmp/pimarchy" <<'PYTHON'
 import sys
 from pathlib import Path
 p = Path(sys.argv[1])
-p.write_text(p.read_text().replace("/usr/share/omarchy", sys.argv[2]))
+p.write_text(p.read_text().replace("/usr/share/omarchy", sys.argv[2]).replace("/var/lib/pimarchy", sys.argv[3]))
 PYTHON
 
 stub_bin="$SUDO_TEST_ROOT/bin"
@@ -78,7 +79,11 @@ printf "\n" >>"$OMARCHY_CHANNEL_TEST_LOG"
 exit 0
 '
 
+# Reading a config file is real git; everything else is logged.
+require_command git
+export OMARCHY_CHANNEL_TEST_GIT=$(command -v git)
 write_stub git '#!/bin/bash
+[[ $1 != "config" ]] || exec "$OMARCHY_CHANNEL_TEST_GIT" "$@"
 printf "git" >>"$OMARCHY_CHANNEL_TEST_LOG"
 for arg in "$@"; do printf "\t%s" "$arg" >>"$OMARCHY_CHANNEL_TEST_LOG"; done
 printf "\n" >>"$OMARCHY_CHANNEL_TEST_LOG"
@@ -242,6 +247,29 @@ pass "dev refuses a region profile missing any fragment or a helper that cannot 
 chmod +x "$checkout/bin/omarchy-apply-pacman"
 OMARCHY_TEST_REGION_FILE="$test_tmp/region" run_channel dev
 assert_log_line $'refresh\tedge' "dev proceeds with a checkout that supports the region"
+
+# Upstream's Omarchy has no templates for a Raspberry Pi, so a Pi clones the
+# repository and branch its Pimarchy checkout updates from, and refuses before
+# any change when that checkout follows no branch.
+rm -rf "$checkout"
+pi_git="$test_tmp/pimarchy/src/.git"
+mkdir -p "$pi_git"
+printf 'ref: refs/heads/quattro\n' >"$pi_git/HEAD"
+git config -f "$pi_git/config" remote.origin.url https://example.invalid/pimarchy.git
+if SUDO_TEST_PLATFORM=aarch64-rpi run_channel dev >"$test_tmp/pi.out" 2>"$test_tmp/pi.err"; then
+  fail "dev on a Pi refuses a Pimarchy checkout that follows no branch"
+fi
+grep -q "follows no branch of a repository to clone" "$test_tmp/pi.err" || fail "dev on a Pi says why it can't clone" "$(cat "$test_tmp/pi.err")"
+if grep -Eq $'^(git|link|refresh)\t' "$log_file"; then
+  fail "dev on a Pi refuses before cloning, linking or refreshing pacman" "$(cat "$log_file")"
+fi
+pass "dev on a Pi refuses before any change when its Pimarchy checkout follows no branch"
+
+git config -f "$pi_git/config" branch.quattro.remote origin
+git config -f "$pi_git/config" branch.quattro.merge refs/heads/quattro
+SUDO_TEST_PLATFORM=aarch64-rpi run_channel dev
+assert_log_line $'git\tclone\t--filter=blob:none\t--branch\tquattro\t--\thttps://example.invalid/pimarchy.git\t'"$checkout" "dev on a Pi clones the branch its Pimarchy checkout updates from"
+assert_log_line $'link\t'"$checkout"$'\t--no-reboot' "dev on a Pi links the Pimarchy clone"
 
 current_channel() {
   OMARCHY_TEST_VERSION_CHANNEL="$1" \

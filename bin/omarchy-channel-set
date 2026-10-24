@@ -68,11 +68,53 @@ validate_dev_region() {
   fi
 }
 
+# Whether checkout $1 has the templates for this platform and channel that its
+# own refresh copies after linking.
+dev_checkout_has_templates() {
+  [[ -f $1/${templates#"$OMARCHY_PATH"/}/pacman-$pacman_channel.conf &&
+    -f $1/${templates#"$OMARCHY_PATH"/}/mirrorlist-$pacman_channel ]]
+}
+
+# Only Pimarchy has a Raspberry Pi's templates, so a Pi's dev checkout clones
+# the repository and branch the Pi builds its own packages from: the upstream
+# of the branch its Pimarchy checkout has checked out (omarchy-update-rpi-pkgs).
+# Root owns that checkout and git won't work in a repository someone else owns,
+# so this reads its files instead, and clones from the upstream rather than the
+# checkout, a blobless partial clone without most of its history's contents.
+clone_pi_dev_checkout() {
+  local checkout="$1" git_dir=/var/lib/pimarchy/src/.git head="" branch="" remote="" merge="" url=""
+
+  if [[ -r $git_dir/HEAD ]]; then
+    read -r head <"$git_dir/HEAD" || true
+  fi
+  if [[ $head == "ref: refs/heads/"* ]]; then
+    branch=${head#ref: refs/heads/}
+    remote=$(git config -f "$git_dir/config" "branch.$branch.remote") || true
+    merge=$(git config -f "$git_dir/config" "branch.$branch.merge") || true
+  fi
+  if [[ -n $remote ]]; then
+    url=$(git config -f "$git_dir/config" "remote.$remote.url") || true
+  fi
+  if [[ -z $url || $merge != "refs/heads/"?* ]]; then
+    fail "This Raspberry Pi's Pimarchy checkout at ${git_dir%/.git} follows no branch of a repository to clone into $checkout. Clone Pimarchy there yourself, then switch to dev again."
+  fi
+
+  git clone --filter=blob:none --branch "${merge#refs/heads/}" -- "$url" "$checkout"
+}
+
 link_dev_checkout() {
   local checkout="$1" required
   # Skip file contents only old history holds, like retired theme videos; git
   # fetches whatever a checkout needs when it needs it.
-  [[ -d $checkout/.git ]] || git clone --filter=blob:none https://github.com/omacom/omarchy.git "$checkout"
+  if [[ $platform == "aarch64-rpi" ]]; then
+    [[ -d $checkout/.git ]] || clone_pi_dev_checkout "$checkout"
+    # No update of upstream's Omarchy brings the Pi's templates.
+    if ! dev_checkout_has_templates "$checkout"; then
+      fail "$checkout is not a Pimarchy checkout: it has no $pacman_channel templates for $platform. Move it aside to have the switch clone this Pi's own Pimarchy source, or check out Pimarchy there."
+    fi
+  else
+    [[ -d $checkout/.git ]] || git clone --filter=blob:none https://github.com/omacom/omarchy.git "$checkout"
+  fi
   validate_dev_region "$checkout"
 
   # Check the destination before changing /etc/omarchy.conf or sudo's path.
@@ -85,8 +127,7 @@ link_dev_checkout() {
   done
 
   # The checkout's own channel refresh runs next, from its own templates.
-  if [[ ! -f $checkout/${templates#"$OMARCHY_PATH"/}/pacman-$pacman_channel.conf ||
-    ! -f $checkout/${templates#"$OMARCHY_PATH"/}/mirrorlist-$pacman_channel ]]; then
+  if ! dev_checkout_has_templates "$checkout"; then
     fail "Update the checkout before switching to dev; it has no $pacman_channel templates for $platform."
   fi
 
