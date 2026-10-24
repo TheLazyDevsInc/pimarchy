@@ -21,7 +21,7 @@ if (( EUID != 0 )); then
 fi
 if (( EUID == 0 )) || unshare --user --map-root-user true 2>/dev/null; then
   live=$("${root_runner[@]}" "$detector") || fail "root detects the live platform"
-  [[ $live =~ ^(aarch64-apple|aarch64-qualcomm|aarch64-n1x|aarch64-gb10|aarch64|x86)$ ]] || fail "root detects the live platform" "live: $live"
+  [[ $live =~ ^(aarch64-apple|aarch64-qualcomm|aarch64-n1x|aarch64-gb10|aarch64-rpi|aarch64|x86)$ ]] || fail "root detects the live platform" "live: $live"
   for platform in aarch64-apple aarch64 x86; do
     fixture="$test_tmp/$platform"
     if [[ -f $fixture/proc/device-tree/compatible ]]; then
@@ -41,7 +41,7 @@ fi
 
 # -p in the shebang is what keeps exported functions and BASH_ENV out, so an
 # ordinary Bash launch with a decoy -p argument is refused before it reads anything.
-for command in omarchy-hw-platform omarchy-hw-aarch64-apple omarchy-hw-apple-silicon omarchy-hw-aarch64-qualcomm omarchy-hw-aarch64-n1x omarchy-hw-n1x omarchy-hw-aarch64-gb10; do
+for command in omarchy-hw-platform omarchy-hw-aarch64-apple omarchy-hw-apple-silicon omarchy-hw-aarch64-qualcomm omarchy-hw-aarch64-n1x omarchy-hw-n1x omarchy-hw-aarch64-gb10 omarchy-hw-aarch64-rpi; do
   if /usr/bin/bash "$ROOT/bin/$command" -p >/dev/null 2>"$test_tmp/error"; then
     fail "$command refuses an ordinary Bash launch"
   fi
@@ -137,10 +137,8 @@ done
 pass "real Apple and Snapdragon device trees are recognised"
 
 write_tree qemu-virt proc linux,dummy-virt
-write_tree raspberry-pi proc raspberrypi,5-model-b brcm,bcm2712
 mkdir -p "$test_tmp/cases/acpi/proc" "$test_tmp/cases/acpi/sys"
 expect qemu-virt aarch64 aarch64 "a QEMU virt board is plain aarch64"
-expect raspberry-pi aarch64 aarch64 "a Raspberry Pi is plain aarch64"
 expect acpi aarch64 aarch64 "an aarch64 machine without a device tree is plain aarch64"
 expect acpi x86_64 x86 "an x86 machine without a device tree is x86"
 pass "unknown aarch64 and x86 machines need no family"
@@ -217,11 +215,46 @@ expect_contradiction gb10-qcom aarch64 "a GB10 with a Qualcomm device tree fails
 n1x_acpi gb10-n1x
 gb10_pci gb10-n1x
 expect_contradiction gb10-n1x aarch64 "a GB10 with the N1x's I2C controllers fails"
-for family in n1x qualcomm gb10; do
+# Raspberry Pis, from the device trees linux-rpi ships: every board the Pi
+# firmware boots names its model under the raspberrypi vendor. The Pi 400's USB 3
+# controller (a VIA VL805 on PCIe) changes nothing.
+write_tree pi400 proc raspberrypi,400 brcm,bcm2711
+write_tree pi400 sys raspberrypi,400 brcm,bcm2711
+mkdir -p "$test_tmp/cases/pi400/sys/bus/pci/devices/0000:01:00.0"
+printf '0x1106\n' >"$test_tmp/cases/pi400/sys/bus/pci/devices/0000:01:00.0/vendor"
+printf '0x3483\n' >"$test_tmp/cases/pi400/sys/bus/pci/devices/0000:01:00.0/device"
+write_tree pi4b proc raspberrypi,4-model-b brcm,bcm2711
+write_tree cm4 sys raspberrypi,4-compute-module brcm,bcm2711
+write_tree pi5 proc raspberrypi,5-model-b brcm,bcm2712
+for board in pi400 pi4b cm4 pi5; do
+  expect "$board" aarch64 aarch64-rpi "the $board device tree is a Raspberry Pi"
+done
+expect_contradiction pi400 x86_64 "a Raspberry Pi device tree on an x86 CPU fails"
+write_tree brcm-only proc brcm,bcm2711
+expect brcm-only aarch64 aarch64 "a Broadcom SoC alone is not a Raspberry Pi"
+write_tree pi-substring proc vendor,raspberrypi,x
+expect pi-substring aarch64 aarch64 "only the raspberrypi vendor prefix names a Pi"
+write_tree pi-apple proc raspberrypi,400 apple,t6000
+expect_contradiction pi-apple aarch64 "a device tree naming a Pi and a Mac fails"
+write_tree pi-qcom proc raspberrypi,400 qcom,x1e80100
+expect_contradiction pi-qcom aarch64 "a device tree naming a Pi and a Snapdragon fails"
+write_tree pi-split proc raspberrypi,400 brcm,bcm2711
+write_tree pi-split sys linux,dummy-virt
+expect_contradiction pi-split aarch64 "a Pi in one device tree and another board in the other fails"
+gb10_pci pi-gb10
+write_tree pi-gb10 proc raspberrypi,400 brcm,bcm2711
+expect_contradiction pi-gb10 aarch64 "a Pi device tree with a GB10's GPU fails"
+n1x_acpi pi-n1x
+write_tree pi-n1x proc raspberrypi,400 brcm,bcm2711
+expect_contradiction pi-n1x aarch64 "a Pi device tree with the N1x's I2C controllers fails"
+pass "Raspberry Pis are a platform of their own, named by their raspberrypi device-tree vendor"
+
+for family in n1x qualcomm gb10 rpi; do
   case $family in
     n1x) yes=n1x-acpi no=qemu-virt ;;
     qualcomm) yes=yoga-slim7x no=n1x-acpi ;;
     gb10) yes=gb10 no=n1x-gpu ;;
+    rpi) yes=pi400 no=qemu-virt ;;
   esac
   for case_name in "$yes" "$no"; do
     status=0
@@ -236,7 +269,7 @@ for family in n1x qualcomm gb10; do
 done
 TEST_ARCH=aarch64 OMARCHY_PROC_ROOT="$test_tmp/cases/n1x-gpu/proc" OMARCHY_SYS_ROOT="$test_tmp/cases/n1x-gpu/sys" \
   PATH="$stub_bin:$ROOT/bin:$PATH" "$ROOT/bin/omarchy-hw-n1x" || fail "the old omarchy-hw-n1x name still answers"
-pass "the NVIDIA N1x and GB10 are platforms of their own, and Snapdragon, the N1x and the GB10 have predicates of their own"
+pass "the NVIDIA N1x and GB10 are platforms of their own, and Snapdragon, the N1x, the GB10 and the Pi have predicates of their own"
 
 failing_uname="$test_tmp/failing-uname"
 mkdir -p "$failing_uname"

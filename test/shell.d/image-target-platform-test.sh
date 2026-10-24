@@ -452,7 +452,7 @@ pass "no unit runs in a private PID namespace"
 if (( EUID == 0 )); then
   skip "running as root, where image setup ignores fixture roots; skipping the manifest names"
 else
-  for platform in x86 aarch64 aarch64-apple aarch64-qualcomm aarch64-n1x aarch64-gb10; do
+  for platform in x86 aarch64 aarch64-apple aarch64-qualcomm aarch64-n1x aarch64-gb10 aarch64-rpi; do
     image_root="$test_tmp/image-names/$platform"
     mkdir -p "$image_root/var/lib/omarchy/image"
     chmod 755 "$image_root/var/lib/omarchy/image"

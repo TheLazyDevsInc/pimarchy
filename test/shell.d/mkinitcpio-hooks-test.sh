@@ -9,7 +9,7 @@ require_platform_fixtures "the composed mkinitcpio HOOKS"
 test_tmp=$(mktemp -d)
 trap 'rm -rf "$test_tmp"' EXIT
 
-for platform in aarch64-apple aarch64 x86; do
+for platform in aarch64-apple aarch64-rpi aarch64 x86; do
   fake_platform "$test_tmp/platforms/$platform" "$platform"
 done
 # omarchy-settings without the runtime package: no detector on PATH.
@@ -24,6 +24,9 @@ devices="$test_tmp/devices"
 omarchy_hooks="base udev plymouth keyboard autodetect microcode modconf kms keymap consolefont block encrypt filesystems fsck btrfs-overlayfs"
 omarchy_hooks_without_kms=${omarchy_hooks/ kms / }
 apple_hooks="base systemd plymouth autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck"
+# The Pi boots linux-rpi from its firmware onto ext4: no Limine overlay hook, no
+# microcode, no LUKS in its image.
+rpi_hooks="base udev plymouth keyboard autodetect modconf kms keymap consolefont block filesystems fsck"
 nvidia_modules="nvidia nvidia_modeset nvidia_uvm nvidia_drm"
 
 # The kernel being built, as modinfo answers for it: KERNEL_MODULES names its
@@ -125,6 +128,7 @@ assert_hooks() {
 new_etc
 assert_hooks "Apple Silicon starts from the systemd baseline" aarch64-apple "$apple_hooks"
 assert_hooks "plain aarch64 starts from the Omarchy baseline" aarch64 "$omarchy_hooks"
+assert_hooks "a Raspberry Pi starts from its own baseline, without Limine's overlay hook" aarch64-rpi "$rpi_hooks"
 assert_hooks "x86 starts from the Omarchy baseline" x86 "$omarchy_hooks"
 assert_hooks "without the detector the Omarchy baseline stays" no-detector "$omarchy_hooks"
 

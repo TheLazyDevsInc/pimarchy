@@ -1,0 +1,21 @@
+# Raspberry Pi additions, composed after omarchy-base.packages and
+# omarchy-aarch64.packages (omarchy-pkg-defaults aarch64-rpi): the Pi firmware's
+# boot chain and the hardware every Pi 4-class board (Pi 4, Pi 400, CM4) has.
+# install/hardware/rpi/ and vulkan.sh install nothing else, so an image's first
+# boot runs its deferred steps offline.
+
+# The Raspberry Pi Foundation's kernel, which the firmware boots straight from
+# the FAT /boot partition (kernel8.img, device trees and overlays). Omarchy's own
+# aarch64 kernel is built without BCM2711 support.
+linux-rpi
+linux-rpi-headers
+# The GPU firmware that boots the board (start4.elf, fixup4.dat), and the
+# Wi-Fi and Bluetooth firmware for its Cypress radio. Both come from [alarm].
+raspberrypi-bootloader
+firmware-raspberrypi
+# vcgencmd, pinctrl and the EEPROM tools' dependencies.
+raspberrypi-utils
+# The bootloader EEPROM updater omarchy-update-firmware runs on a Pi 4 or 400.
+rpi4-eeprom
+# VideoCore VI (v3d) Vulkan. It is a platform device, so lspci never finds it.
+vulkan-broadcom
