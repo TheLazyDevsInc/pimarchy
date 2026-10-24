@@ -19,3 +19,8 @@ raspberrypi-utils
 rpi4-eeprom
 # VideoCore VI (v3d) Vulkan. It is a platform device, so lspci never finds it.
 vulkan-broadcom
+# Screen recording: the Pi's display (vc4) and GPU (v3d) are separate DRM
+# devices, as on Apple Silicon, where gpu-screen-recorder finds no display device
+# to capture on. Whether it captures on a Pi is untested, so carry wf-recorder,
+# which omarchy-capture-screenrecording falls back to when it cannot start.
+wf-recorder

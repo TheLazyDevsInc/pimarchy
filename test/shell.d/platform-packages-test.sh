@@ -87,6 +87,11 @@ for family in aarch64-qualcomm aarch64-n1x aarch64-gb10 aarch64-rpi; do
   done < <(names_of aarch64)
   for other in aarch64 aarch64-apple x86; do
     while IFS= read -r package; do
+      # A package two families each name, such as wf-recorder on the Mac and
+      # the Pi, is both lists' own choice rather than one leaking into the other.
+      if [[ $other == aarch64-* ]] && grep -Fxq "$package" <<<"$(names_of "$other")"; then
+        continue
+      fi
       ! grep -Fxq "$package" <<<"$(OMARCHY_PATH="$ROOT" omarchy-pkg-defaults "$other")" ||
         fail "$other leaves out $family's $package"
     done < <(names_of "$family")
@@ -94,8 +99,9 @@ for family in aarch64-qualcomm aarch64-n1x aarch64-gb10 aarch64-rpi; do
 done
 grep -Fxq linux-omarchy <<<"$(names_of aarch64-n1x)" || fail "the N1x list names its kernel"
 # The Pi boots the Raspberry Pi kernel from its own firmware: Omarchy's aarch64
-# kernel has no BCM2711 support, and Limine needs UEFI, which the Pi lacks.
-for package in linux-rpi raspberrypi-bootloader firmware-raspberrypi vulkan-broadcom; do
+# kernel has no BCM2711 support, and Limine needs UEFI, which the Pi lacks. Its
+# display and GPU are separate devices, so it records the screen as the Mac does.
+for package in linux-rpi raspberrypi-bootloader firmware-raspberrypi vulkan-broadcom wf-recorder; do
   grep -Fxq "$package" <<<"$(names_of aarch64-rpi)" || fail "the Pi list names $package"
 done
 ! grep -Eqx 'linux-omarchy|limine.*|snapper' <<<"$(names_of aarch64-rpi)" || fail "the Pi list leaves out the UEFI boot stack"
