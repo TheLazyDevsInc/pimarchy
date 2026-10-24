@@ -20,6 +20,11 @@ if omarchy-hw-aarch64-qualcomm; then
   PACKAGES+=(vulkan-freedreno)
 fi
 
+# The Pi's VideoCore (V3D) GPU is a platform device, so lspci never sees it.
+if omarchy-hw-aarch64-rpi; then
+  PACKAGES+=(vulkan-broadcom)
+fi
+
 if (( ${#PACKAGES[@]} > 0 )); then
   omarchy-pkg-add "${PACKAGES[@]}"
 fi

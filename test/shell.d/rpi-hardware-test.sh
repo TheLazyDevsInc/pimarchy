@@ -90,3 +90,26 @@ for item in system.suspend system.hibernate; do
   run_sleep x86 bash -c "$(guard "$item")" || fail "the $item row stays on an x86 PC"
 done
 pass "the menu hides Suspend and Hibernate on a Pi"
+
+# Vulkan: the Pi's GPU never shows in lspci, so its family installs the driver.
+vulkan_setup="$ROOT/install/hardware/vulkan.sh"
+cat >"$scratch/bin/omarchy-pkg-add" <<'SH'
+#!/bin/bash
+printf 'omarchy-pkg-add %s\n' "$*" >>"$CALL_LOG"
+SH
+cat >"$scratch/bin/lspci" <<'SH'
+#!/bin/bash
+[[ -z ${TEST_LSPCI:-} ]] || printf '%s\n' "$TEST_LSPCI"
+SH
+chmod +x "$scratch/bin"/*
+for machine in pi400 pi4; do
+  run "$machine" bash "$vulkan_setup"
+  [[ $(<"$CALL_LOG") == "omarchy-pkg-add vulkan-broadcom" ]] || fail "a $machine gets the Broadcom Vulkan driver" "$(<"$CALL_LOG")"
+done
+run arm bash "$vulkan_setup"
+[[ ! -s $CALL_LOG ]] || fail "a plain ARM machine installs no Vulkan driver" "$(<"$CALL_LOG")"
+TEST_LSPCI='00:02.0 VGA compatible controller: Intel Corporation Device 7d55' run x86 bash "$vulkan_setup"
+[[ $(<"$CALL_LOG") == "omarchy-pkg-add vulkan-intel" ]] || fail "an x86 PC still gets its lspci-matched driver alone" "$(<"$CALL_LOG")"
+grep -Fxq vulkan-broadcom <(sed -e 's/[[:space:]]*#.*$//' "$ROOT/install/omarchy-aarch64-rpi.packages") ||
+  fail "the Pi package list carries vulkan-broadcom, so an image's first boot installs nothing"
+pass "a Pi installs vulkan-broadcom, and other machines keep their drivers"
