@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# omarchy:summary=Detect the Broadcom VideoCore (vc4/v3d) GPU
+# omarchy:hidden=true
+
+drm_path="${OMARCHY_DRM_PATH:-/sys/class/drm}"
+
+shopt -s nullglob
+
+for compatible in "$drm_path"/card*/device/of_node/compatible; do
+  [[ -r $compatible ]] || continue
+  tr '\0' '\n' <"$compatible" | grep -qE 'brcm,(bcm2711-vc5|2711-v3d|bcm2835-vc4)' && exit 0
+done
+
+exit 1

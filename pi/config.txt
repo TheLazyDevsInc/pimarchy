@@ -1,0 +1,35 @@
+# Raspberry Pi 400 firmware boot config.
+#
+# Template installed to /boot/config.txt by omarchy-refresh-rpi-boot (not yet
+# implemented — see plans/pi-400-port.md Task 5.2). Unlike cmdline.txt, this
+# file has no substitution placeholders; it is copied through unchanged.
+
+arm_64bit=1
+kernel=kernel8.img
+
+# ALARM's linux-rpi package does generate an initramfs (it ships an ALPM hook
+# that rebuilds it for kernel8.img on every kernel update), so load it and
+# keep it pinned to whichever image "kernel=" above points at.
+initramfs initramfs-linux.img followkernel
+
+# Full KMS. Hyprland needs a real DRM/KMS driver — vc4 for scanout, v3d for
+# rendering — not the legacy firmware-KMS overlay this replaces.
+dtoverlay=vc4-kms-v3d
+
+# Required for both micro-HDMI outputs to be usable at once under
+# vc4-kms-v3d; without it the second connector never gets a framebuffer.
+max_framebuffers=2
+
+disable_overscan=1
+disable_splash=1
+arm_boost=1
+
+# gpu_mem is deliberately NOT set here: it only controls the memory split for
+# the legacy firmware-KMS/VideoCore GPU path, which dtoverlay=vc4-kms-v3d
+# above replaces entirely. Setting it would just reserve RAM the full-KMS
+# path never asks for.
+#
+# hdmi_enable_4kp60 and any overclock setting (over_voltage, arm_freq, and
+# friends) are deliberately absent too: both add heat on a fanless Pi 400,
+# and both are the kind of thing a user should opt into explicitly rather
+# than inherit from a shipped default.

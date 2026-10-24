@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# omarchy:summary=Check if running on a Raspberry Pi 400
+# omarchy:hidden=true
+
+model_path="${OMARCHY_DT_MODEL_PATH:-/proc/device-tree/model}"
+[[ -r $model_path ]] || exit 1
+tr -d '\0' <"$model_path" | grep -qi "raspberry pi 400"

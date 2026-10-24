@@ -14,6 +14,17 @@ Item {
   property string pendingPowerSource: ""
   property string activePowerProfile: ""
   readonly property bool powerSaverOnBattery: UPower.onBattery && activePowerProfile === "power-saver"
+  // Same expression Panel.qml uses to hide the power panel: no UPower device
+  // means no battery, so there is nothing for the 30s timer below to poll.
+  readonly property bool batteryPresent: {
+    var device = UPower.displayDevice
+    return !!(device && device.isPresent)
+  }
+  // Flips off the first time parseActiveProfile() comes back empty (see
+  // below), so hardware with no power-profiles-daemon support -- no battery,
+  // no platform_profile, no intel_pstate/amd_pstate, e.g. a Pi 400 -- stops
+  // spawning busctl every two seconds once we know there is nothing to read.
+  property bool powerProfilesAvailable: true
 
   PersistentProperties {
     id: persisted
@@ -90,7 +101,14 @@ Item {
     command: ["busctl", "--json=short", "get-property", "net.hadess.PowerProfiles", "/net/hadess/PowerProfiles", "net.hadess.PowerProfiles", "ActiveProfile"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.activePowerProfile = root.parseActiveProfile(text)
+      onStreamFinished: {
+        var profile = root.parseActiveProfile(text)
+        // An empty parse means the daemon returned nothing usable. That is
+        // permanent on hardware with no power-profiles-daemon support, so
+        // stop the poll below rather than keep asking forever.
+        if (profile === "") root.powerProfilesAvailable = false
+        root.activePowerProfile = profile
+      }
     }
   }
 
@@ -99,15 +117,16 @@ Item {
     // them visible to consumers such as the wallpaper service without requiring
     // the power panel to be open.
     interval: 2000
-    running: true
+    running: root.powerProfilesAvailable
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refreshPowerProfile()
   }
 
   Timer {
+    // No battery, nothing to check.
     interval: 30000
-    running: true
+    running: root.batteryPresent
     repeat: true
     triggeredOnStart: true
     onTriggered: root.checkBattery()

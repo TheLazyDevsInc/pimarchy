@@ -29,6 +29,11 @@ esac
 
 mapfile -t profiles < <(omarchy-powerprofiles-list)
 
+# No profiles means no power-profiles-daemon support on this hardware (no
+# battery, no platform_profile, no intel_pstate/amd_pstate -- e.g. a Pi 400).
+# There is nothing to set, so succeed quietly instead of failing every boot.
+(( ${#profiles[@]} == 0 )) && exit 0
+
 profile_available() {
   [[ " ${profiles[*]} " == *" $1 "* ]]
 }

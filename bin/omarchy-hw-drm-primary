@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# omarchy:summary=Print the primary KMS DRM device path
+# omarchy:hidden=true
+
+drm_path="${OMARCHY_DRM_PATH:-/sys/class/drm}"
+dri_by_path="${OMARCHY_DRI_BY_PATH:-/dev/dri/by-path}"
+
+shopt -s nullglob
+
+# Only exact "cardN" entries are devices; "cardN-<connector>" directories
+# describe connectors and would otherwise inflate the card count.
+cards=()
+for entry in "$drm_path"/card*; do
+  [[ $entry =~ /card[0-9]+$ ]] && cards+=("$entry")
+done
+
+# 0 or 1 card is the normal x86 case: there is nothing to disambiguate, so
+# print nothing and let callers treat that as "no override needed".
+(( ${#cards[@]} > 1 )) || exit 1
+
+# The scanout device is whichever card owns connector directories; on a Pi
+# that's vc4, while v3d is render-only and has none.
+scanout=""
+for card in "${cards[@]}"; do
+  connectors=("$card"-*)
+  (( ${#connectors[@]} > 0 )) || continue
+  scanout=$card
+  break
+done
+
+[[ -n $scanout ]] || exit 1
+
+card_name="${scanout##*/}"
+
+# cardN numbering is not stable across boots, so prefer the stable by-path
+# symlink that resolves to this card over the raw /dev/dri/cardN path.
+for link in "$dri_by_path"/*-card; do
+  [[ -L $link ]] || continue
+  target=$(readlink -- "$link")
+  [[ ${target##*/} == $card_name ]] || continue
+  printf '%s\n' "$link"
+  exit 0
+done
+
+printf '%s\n' "/dev/dri/$card_name"
