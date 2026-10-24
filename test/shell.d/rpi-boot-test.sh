@@ -65,14 +65,15 @@ echo "lsinitcpio \$*" >>"$calls"
 [[ \$1 == "-l" && \$2 == "$root/boot/initramfs-linux.img" ]] || exit 64
 cat "$state/listing"
 SH
-# lsblk pads its columns.
+# lsblk pads its columns. It answers PARTN and PTTYPE from udev's database,
+# which is empty in early boot until udev has processed the disk again, so the
+# stub leaves them empty, as lsblk does then.
 cat >"$stubs/lsblk" <<SH
 #!/bin/bash
 echo "lsblk \$*" >>"$calls"
 case "\$*" in
-  "-no PKNAME /dev/mmcblk0p2") printf '%s  \n' "\$(cat "$state/pkname")" ;;
-  "-no PARTN /dev/mmcblk0p2") printf '%s\n' "\$(cat "$state/partn")" ;;
-  "-dno PTTYPE /dev/mmcblk0") printf '%s\n' "\$(cat "$state/pttype")" ;;
+  "-no KNAME,PKNAME /dev/mmcblk0p2") printf 'mmcblk0p2 %s  \n' "\$(cat "$state/pkname")" ;;
+  "-no PARTN /dev/mmcblk0p2" | "-dno PTTYPE /dev/mmcblk0") echo ;;
   "-bdno SIZE /dev/mmcblk0") printf ' %s\n' "\$(cat "$state/disk-bytes")" ;;
   *) echo "lsblk: unexpected \$*" >&2; exit 64 ;;
 esac
@@ -104,7 +105,7 @@ reset_root() {
   rm -rf "$root" "$state"
   : >"$calls"
   mkdir -p "$state" "$root/boot" "$root/dev" "$root/etc/limine-entry-tool.d" "$root/etc/mkinitcpio.conf.d" \
-    "$root/usr/lib/modules/$kversion" "$root/var/lib/omarchy/image" "$root/var/lib/pimarchy"
+    "$root/sys/class/block/mmcblk0p2" "$root/usr/lib/modules/$kversion" "$root/var/lib/omarchy/image" "$root/var/lib/pimarchy"
   cp "$alarm/cmdline.txt" "$alarm/config.txt" "$root/boot/"
   cp "$ROOT/etc/limine-entry-tool.d/omarchy-defaults.conf" "$root/etc/limine-entry-tool.d/"
   echo "HOOKS=(base udev)" >"$root/etc/mkinitcpio.conf"
@@ -114,6 +115,7 @@ reset_root() {
   printf 'kernel' >"$root/boot/kernel8.img"
   printf 'initramfs' >"$root/boot/initramfs-linux.img"
   touch "$root/dev/mmcblk0p1" "$root/dev/mmcblk0p2" "$root/dev/sda1" "$root/var/lib/pimarchy/grow-root-pending"
+  echo 2 >"$root/sys/class/block/mmcblk0p2/partition"
   chmod -R go-w "$root"
 
   echo "$partuuid" >"$state/partuuid"
@@ -123,8 +125,6 @@ reset_root() {
   printf '%s\n' usr/bin/busybox "usr/lib/modules/$kversion" "usr/lib/modules/$kversion/modules.dep" \
     "usr/lib/modules/$kversion/kernel/drivers/gpu/drm/vc4/vc4.ko.zst" >"$state/listing"
   echo mmcblk0 >"$state/pkname"
-  echo 2 >"$state/partn"
-  echo dos >"$state/pttype"
   echo 31914983424 >"$state/disk-bytes"
   cat >"$state/dump" <<'DUMP'
 label: dos
@@ -513,14 +513,17 @@ pass "update-verify explains every failure at once"
 
 # ── grow-root ────────────────────────────────────────────────────────────────
 
-growth="lsblk -no PKNAME /dev/mmcblk0p2
-lsblk -dno PTTYPE /dev/mmcblk0
-lsblk -no PARTN /dev/mmcblk0p2
+growth="lsblk -no KNAME,PKNAME /dev/mmcblk0p2
 sfdisk --dump /dev/mmcblk0
 lsblk -bdno SIZE /dev/mmcblk0"
 lookups="findmnt -nvo SOURCE /
 findmnt -no FSTYPE /
 $growth"
+
+# Whether grow-root ran anything that changes a partition or a filesystem.
+changed_disk() {
+  grep -v '^sfdisk --dump ' "$calls" | grep -q '^sfdisk\|^partx\|^resize2fs'
+}
 
 reset_root
 output=$(on aarch64-rpi grow-root 2>&1) || fail "grow-root grows the root" "$output"
@@ -585,16 +588,33 @@ for case in btrfs nfs gpt partition3 whole-disk; do
   case $case in
     btrfs) echo btrfs >"$state/fstype" ;;
     nfs) echo "server:/export" >"$state/source" ;;
-    gpt) echo gpt >"$state/pttype" ;;
-    partition3) echo 3 >"$state/partn" ;;
+    gpt) sed -i 's/^label: dos$/label: gpt/' "$state/dump" ;;
+    partition3) echo 3 >"$root/sys/class/block/mmcblk0p2/partition" ;;
     whole-disk) : >"$state/pkname" ;;
   esac
   output=$(on aarch64-rpi grow-root 2>&1) || fail "grow-root leaves a $case root alone" "$output"
   [[ $output == "Not growing the root filesystem: "* ]] || fail "grow-root says why it leaves a $case root alone" "$output"
-  ! grep -q '^sfdisk\|^partx\|^resize2fs' "$calls" || fail "grow-root changes nothing on a $case root" "$(cat "$calls")"
+  ! changed_disk || fail "grow-root changes nothing on a $case root" "$(cat "$calls")"
   [[ ! -e $root/var/lib/pimarchy/grow-root-pending ]] || fail "grow-root retires on a $case root"
 done
 pass "grow-root leaves a root that is not ext4 on partition 2 of an MBR disk alone, and retires"
+
+# A table type or partition number it can't read yet is no layout to leave
+# alone: the run fails and keeps the marker for the next boot.
+for case in no-label no-partition empty-partition; do
+  reset_root
+  case $case in
+    no-label) sed -i '/^label:/d' "$state/dump" ;;
+    no-partition) rm "$root/sys/class/block/mmcblk0p2/partition" ;;
+    empty-partition) : >"$root/sys/class/block/mmcblk0p2/partition" ;;
+  esac
+  status=0
+  output=$(on aarch64-rpi grow-root 2>&1) || status=$?
+  (( status == 1 )) && [[ -e $root/var/lib/pimarchy/grow-root-pending ]] ||
+    fail "grow-root keeps its marker when it can't read the layout ($case)" "status $status: $output"
+  ! changed_disk && ! grep -q '^systemctl' "$calls" || fail "grow-root changes nothing when it can't read the layout ($case)" "$(cat "$calls")"
+done
+pass "grow-root reads the layout from the partition table and sysfs, not udev, and retries what it can't read yet"
 
 # The unit runs grow-root in early boot, only while the image's marker is there.
 unit=$scripts/omarchy-rpi-grow-root.service

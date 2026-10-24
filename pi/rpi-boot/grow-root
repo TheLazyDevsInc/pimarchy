@@ -14,14 +14,14 @@
 # changed can leave the filesystem short of its partition, and resize2fs changes
 # nothing when it already fills it. Then the marker goes and the unit disables
 # itself. A root it can't grow (not ext4, or not partition 2 of an MBR disk) is
-# reported and left alone for good. A failed step keeps the marker, so the next
-# boot tries again.
+# reported and left alone for good. A failed step, or a layout it can't read
+# yet, keeps the marker, so the next boot tries again.
 #
 # systemd runs this as root, which may also run it directly, so it uses fixed
 # paths and checks the platform itself, before it reads anything else (its
 # marker included). An unprivileged test may name a fixture root in
-# OMARCHY_RPI_BOOT_ROOT, which prefixes the marker, and stub the tools on its
-# PATH; root ignores both, as omarchy-hw-platform does.
+# OMARCHY_RPI_BOOT_ROOT, which prefixes the marker and /sys, and stub the tools
+# on its PATH; root ignores both, as omarchy-hw-platform does.
 if [[ $- != *p* ]]; then
   echo "Refusing an unsafe Bash startup." >&2
   exit 126
@@ -92,17 +92,33 @@ fstype=$(findmnt -no FSTYPE /) || fail "cannot find the type of the filesystem a
 [[ $fstype == "ext4" ]] || leave "/ is ${fstype:-of no known type}, not ext4"
 [[ $source == /dev/* ]] || leave "/ is mounted from ${source:-nothing}, not a disk partition"
 
-disk_name=$(ask_lsblk -no PKNAME "$source") || fail "lsblk cannot read $source"
+# The layout comes from sysfs and the partition table, not from udev: lsblk
+# answers PTTYPE and PARTN from udev's database, which the initramfs empties
+# before it switches to the root, and nothing orders this after udev has
+# processed the disk again. lsblk's KNAME and PKNAME come from sysfs. A value
+# that can't be read yet fails the run, so the next boot tries again; only a
+# layout read in full is left alone for good.
+names=$(lsblk -no KNAME,PKNAME "$source") || fail "lsblk cannot read $source"
+read -r name disk_name _ <<<"$names"
+[[ -n $name ]] || fail "lsblk names no device for $source"
 [[ -n $disk_name ]] || leave "$source is not a partition of a disk"
 disk=/dev/$disk_name
-label=$(ask_lsblk -dno PTTYPE "$disk") || fail "lsblk cannot read $disk"
-[[ $label == "dos" ]] || leave "the partition table of $disk is ${label:-unknown}, not MBR (dos)"
-partition=$(ask_lsblk -no PARTN "$source") || fail "lsblk cannot read $source"
-[[ $partition == "2" ]] || leave "$source is partition ${partition:-unknown} of $disk, not partition 2"
+
+dump=$(sfdisk --dump "$disk") || fail "sfdisk cannot read the partition table of $disk"
+label=$(gawk '$1 == "label:" { print $2; exit }' <<<"$dump")
+[[ -n $label ]] || fail "sfdisk names no partition table type for $disk"
+[[ $label == "dos" ]] || leave "the partition table of $disk is $label, not MBR (dos)"
+
+number=/sys/class/block/$name/partition
+partition=""
+if [[ -r $fixture$number ]]; then
+  read -r partition <"$fixture$number" || partition=""
+fi
+[[ $partition =~ ^[0-9]+$ ]] || fail "cannot read the partition number of $source from $number"
+[[ $partition == "2" ]] || leave "$source is partition $partition of $disk, not partition 2"
 
 # Partition 2's start and size, and the first partition starting after it, from
 # the table itself, in the table's sectors.
-dump=$(sfdisk --dump "$disk") || fail "sfdisk cannot read the partition table of $disk"
 geometry=$(gawk -v node="$source" '
   /^sector-size:/ { sector = $2 }
   $2 == ":" {
