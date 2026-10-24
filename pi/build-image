@@ -336,6 +336,13 @@ check_prerequisites() {
     fi
   fi
 
+  if command -v git >/dev/null; then
+    version=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || version=""
+    if [[ -z $version ]] || ! version_at_least "$version" 2.28; then
+      problems+=("git ${version:-of an unknown version} can't start the image's checkout on its branch (git init -b): git 2.28 or newer is needed")
+    fi
+  fi
+
   qemu_bin=""
   if [[ $machine != "aarch64" ]]; then
     if [[ $runner == "chroot" ]]; then

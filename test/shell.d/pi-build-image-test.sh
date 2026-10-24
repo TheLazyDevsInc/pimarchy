@@ -88,10 +88,11 @@ stub() {
   printf '#!/bin/bash\n%s\n' "$2" >"$stubs/$1"
   chmod +x "$stubs/$1"
 }
-for tool in bsdtar mkfs.vfat fsck.vfat mcopy e2fsck sfdisk xz git curl; do
+for tool in bsdtar mkfs.vfat fsck.vfat mcopy e2fsck sfdisk xz curl; do
   stub "$tool" 'exit 0'
 done
 good_stubs() {
+  stub git 'echo "git version 2.47.0"'
   stub mke2fs 'echo "mke2fs 1.47.0 (5-Feb-2023)" >&2'
   stub findmnt 'echo "ext4 rw,relatime"'
   stub proot 'echo "|__|  |__|__\_____/\_____/\____| 5.4.0"'
@@ -151,6 +152,7 @@ else
   skip "the chroot runner's binfmt checks (an aarch64 host runs the image natively)"
 fi
 
+stub git 'echo "git version 2.25.1"'
 stub mke2fs 'echo "mke2fs 1.42.9 (28-Dec-2013)" >&2'
 stub findmnt 'echo "vfat rw,noexec,relatime"'
 stub proot 'echo "|__|  |__|__\_____/\_____/\____| 5.1.0"'
@@ -162,13 +164,13 @@ status=0
 output=$(PATH="$stubs:$PATH" output="$TMPDIR/private/prereq-out" runner=proot bash -c 'source "$1"; check_prerequisites' bash "$BUILDER" 2>&1) || status=$?
 (( status != 0 )) || fail "old tools fail the prerequisite checks" "$output"
 for expected in "proot 5.1.0 does not translate faccessat2" "mke2fs 1.42.9 can't build a filesystem from a directory" \
-  "is on a vfat filesystem" "mounted noexec" "$TMPDIR/private is not searchable by other users"; do
+  "git 2.25.1 can't start the image's checkout on its branch" "is on a vfat filesystem" "mounted noexec" "$TMPDIR/private is not searchable by other users"; do
   [[ $output == *"$expected"* ]] || fail "old tools fail the prerequisite checks with a reason each" "expected '$expected' in: $output"
 done
 if [[ $(uname -m) != "aarch64" ]]; then
   [[ $output == *"is qemu 8.2.2; qemu-user 8.2 crashes"* ]] || fail "qemu 8.2 fails the prerequisite checks" "$output"
 fi
-pass "old proot, qemu and mke2fs, a FAT or noexec output, and an output under a private directory fail the prerequisite checks with a reason each"
+pass "old proot, qemu, mke2fs and git, a FAT or noexec output, and an output under a private directory fail the prerequisite checks with a reason each"
 
 # ── The output directory ─────────────────────────────────────────────────────
 
