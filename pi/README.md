@@ -19,6 +19,8 @@ This directory builds Pimarchy, this fork's Omarchy for the Raspberry Pi 400, as
 
 `pi/build-image` runs on an x86_64 or aarch64 Linux computer, as root. It needs no mounts or loop devices, so it also runs in a container. It runs every command meant for the image inside the image root, using proot and, on x86_64, qemu-user. Package installs, scriptlets and Omarchy's own setup therefore run as they would on the Pi, only much slower. Expect a build to take a few hours on x86_64, and to need about 25 GiB of free disk where `--output` points.
 
+proot only maps files. Everything the build runs inside the image runs as root on this computer's kernel, with its network, `/dev` and `/sys`. Package scripts and Omarchy's setup are written for the machine they install, so build in a container or a throwaway VM rather than on a computer you care about.
+
 ```bash
 sudo pi/build-image --output ~/pimarchy-image
 ```
