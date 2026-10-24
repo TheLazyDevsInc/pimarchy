@@ -84,6 +84,10 @@ pass "package names map as the ISO's aarch64 filter maps them, with linux-rpi as
 
 stubs=$TMPDIR/stubs
 mkdir -p "$stubs" "$TMPDIR/prereq-out"
+# A directory other users can't search, as a home directory is.
+mkdir -m 0700 "$TMPDIR/private"
+mkdir "$TMPDIR/private/prereq-out" "$TMPDIR/private/bin"
+real_tmp=$(readlink -f -- "$TMPDIR")
 stub() {
   printf '#!/bin/bash\n%s\n' "$2" >"$stubs/$1"
   chmod +x "$stubs/$1"
@@ -116,13 +120,17 @@ binfmt_entry qemu-aarch64 POCF "$stubs/qemu-aarch64"
 prereq() { # runner, then extra environment
   local runner=$1
   shift
-  PATH="$stubs:$PATH" output="$TMPDIR/prereq-out" OMARCHY_BINFMT_DIR="$binfmt" runner=$runner "$@" \
+  PATH="$stubs:$PATH" output="$TMPDIR/prereq-out" OMARCHY_BINFMT_DIR="$binfmt" runner=$runner env "$@" \
     bash -c 'source "$1"; check_prerequisites && echo "chosen: $runner"' bash "$BUILDER" 2>&1
 }
 if [[ $(uname -m) != "aarch64" ]]; then
   output=$(prereq chroot) || fail "a registered aarch64 handler passes the chroot runner's checks" "$output"
   [[ $output == *"Runner: chroot"* && $output == *"through binfmt_misc"* ]] ||
     fail "the chroot runner runs the image's binaries through binfmt_misc" "$output"
+  # The image's accounts look paths up inside the chroot, never above it.
+  output=$(prereq chroot output="$TMPDIR/private/prereq-out") ||
+    fail "the chroot runner builds under a directory other users can't search" "$output"
+  pass "the chroot runner builds under a directory other users can't search"
   output=$(prereq auto) || fail "auto picks the chroot runner where binfmt_misc can run aarch64 binaries" "$output"
   [[ $output == *"chosen: chroot"* ]] || fail "auto picks the chroot runner where binfmt_misc can run aarch64 binaries" "$output"
   binfmt_entry qemu-aarch64 POC "$stubs/qemu-aarch64"
@@ -158,19 +166,24 @@ stub findmnt 'echo "vfat rw,noexec,relatime"'
 stub proot 'echo "|__|  |__|__\_____/\_____/\____| 5.1.0"'
 stub qemu-aarch64-static 'echo "qemu-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)"'
 stub qemu-aarch64 'echo "qemu-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)"'
-mkdir -m 0700 "$TMPDIR/private"
-mkdir "$TMPDIR/private/prereq-out"
+# qemu sits in the private directory, and the output is reached through a
+# symlink into it.
+mv "$stubs/qemu-aarch64-static" "$stubs/qemu-aarch64" "$TMPDIR/private/bin/"
+ln -s private "$TMPDIR/private-link"
 status=0
-output=$(PATH="$stubs:$PATH" output="$TMPDIR/private/prereq-out" runner=proot bash -c 'source "$1"; check_prerequisites' bash "$BUILDER" 2>&1) || status=$?
+output=$(PATH="$TMPDIR/private/bin:$stubs:$PATH" output="$TMPDIR/private-link/prereq-out" runner=proot \
+  bash -c 'source "$1"; check_prerequisites' bash "$BUILDER" 2>&1) || status=$?
 (( status != 0 )) || fail "old tools fail the prerequisite checks" "$output"
 for expected in "proot 5.1.0 does not translate faccessat2" "mke2fs 1.42.9 can't build a filesystem from a directory" \
-  "git 2.25.1 can't start the image's checkout on its branch" "is on a vfat filesystem" "mounted noexec" "$TMPDIR/private is not searchable by other users"; do
+  "git 2.25.1 can't start the image's checkout on its branch" "is on a vfat filesystem" "mounted noexec" "$real_tmp/private is not searchable by other users, so the image's own accounts can't reach the image root"; do
   [[ $output == *"$expected"* ]] || fail "old tools fail the prerequisite checks with a reason each" "expected '$expected' in: $output"
 done
 if [[ $(uname -m) != "aarch64" ]]; then
   [[ $output == *"is qemu 8.2.2; qemu-user 8.2 crashes"* ]] || fail "qemu 8.2 fails the prerequisite checks" "$output"
+  [[ $output == *"$real_tmp/private is not searchable by other users, so the image's own accounts can't run "* ]] ||
+    fail "qemu under a private directory fails the prerequisite checks" "$output"
 fi
-pass "old proot, qemu, mke2fs and git, a FAT or noexec output, and an output under a private directory fail the prerequisite checks with a reason each"
+pass "old proot, qemu, mke2fs and git, a FAT or noexec output, and an output or qemu under a private directory fail the prerequisite checks with a reason each"
 
 # ── The output directory ─────────────────────────────────────────────────────
 

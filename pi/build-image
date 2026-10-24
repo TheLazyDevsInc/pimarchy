@@ -275,6 +275,24 @@ qemu_problems() {
   fi
 }
 
+# Each directory from $1, with its symlinks resolved, up to / that other users
+# can't search.
+unsearchable_dirs() {
+  local dir
+
+  dir=$(readlink -f -- "$1") || return 0
+  while [[ -n $dir ]]; do
+    if (( ! (8#$(stat -c '%a' -- "$dir") & 1) )); then
+      printf '%s\n' "$dir"
+    fi
+    if [[ $dir == "/" ]]; then
+      dir=""
+    else
+      dir=$(dirname -- "$dir")
+    fi
+  done
+}
+
 check_prerequisites() {
   local tool problems=() missing=() version machine target_dir fs_type fs_options avail_kib dir binfmt_interpreter=""
 
@@ -382,21 +400,22 @@ check_prerequisites() {
     fi
   fi
 
-  # Programs inside the image that run as one of its own accounts (makepkg as
-  # the build user, scriptlets through runuser) open the image's files through
-  # their path on this host, so every directory above the image root must let
-  # anyone through.
-  dir=$target_dir
-  while [[ -n $dir ]]; do
-    if (( ! (8#$(stat -c '%a' -- "$dir") & 1) )); then
+  # Under proot, programs inside the image that run as one of its own accounts
+  # (makepkg as the build user, scriptlets through runuser) open the image's
+  # files and run qemu through their real paths on this host, so every
+  # directory above those must let anyone through. The chroot runner starts
+  # their lookups inside the image root, and binfmt_misc opened its qemu when
+  # qemu was registered.
+  if [[ $runner == "proot" ]]; then
+    while IFS= read -r dir; do
       problems+=("$dir is not searchable by other users, so the image's own accounts can't reach the image root under $output: chmod o+x it, or pick another --output")
+    done < <(unsearchable_dirs "$target_dir")
+    if [[ -n $qemu_bin ]]; then
+      while IFS= read -r dir; do
+        problems+=("$dir is not searchable by other users, so the image's own accounts can't run $qemu_bin: chmod o+x it, or put qemu where other users can reach it")
+      done < <(unsearchable_dirs "$(dirname -- "$(readlink -f -- "$qemu_bin")")")
     fi
-    if [[ $dir == "/" ]]; then
-      dir=""
-    else
-      dir=$(dirname -- "$dir")
-    fi
-  done
+  fi
 
   if (( ${#problems[@]} )); then
     printf 'Error: %s\n' "${problems[@]}" >&2
