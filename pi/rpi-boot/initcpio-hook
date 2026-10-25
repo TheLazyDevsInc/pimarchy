@@ -167,14 +167,18 @@ run_hook() {
     omarchy_rpi_boot=$boot
 }
 
+# $1 is the root's mount point, /new_root by default (mkinitcpio 42 mounts the
+# root on /sysroot and makes /new_root a link to it). The root's fstab is there
+# only once the root is mounted; busybox's mountpoint, which doesn't follow the
+# link, can't say.
 run_latehook() {
-    local mountpoint=/run/omarchy-rpi-disk-id
+    local sysroot=${1:-/new_root} mountpoint=/run/omarchy-rpi-disk-id
 
     [ -n "${omarchy_rpi_new_id:-}" ] || return 0
 
     # Systemd mounts /boot by its PARTUUID from fstab, so a new identifier that
     # fstab can't follow goes back to the old one.
-    if ! mountpoint -q /new_root || ! omarchy_rpi_fstab /new_root/etc/fstab "$omarchy_rpi_new_id"; then
+    if ! omarchy_rpi_fstab "$sysroot/etc/fstab" "$omarchy_rpi_new_id"; then
         err "omarchy-rpi-disk-id: cannot update the root's /etc/fstab, so the disk keeps its identifier; the next boot tries again"
         omarchy_rpi_set_disk_id "$omarchy_rpi_disk" "$omarchy_rpi_old_id" || true
         partprobe "$omarchy_rpi_disk" >/dev/null 2>&1 || true

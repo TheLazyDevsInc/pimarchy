@@ -739,19 +739,39 @@ else
     fail "cmdline.txt names the root by its new PARTUUID and drops the first-boot flag" "$(<"$tmp/cmdline.txt")"
   pass "fstab's / and /boot and cmdline.txt's root follow the new identifier, and the first-boot flag goes"
 
-  # When fstab can't follow, the late hook writes the old identifier back, so
-  # systemd still finds /boot, and leaves cmdline.txt for the next boot.
+  # When fstab can't follow (no root is mounted), the late hook writes the old
+  # identifier back, so systemd still finds /boot, and leaves cmdline.txt for
+  # the next boot.
   printf 'root=UUID=93f96c19 rw pimarchy.new_disk_id=8a70c72b\n' >"$tmp/cmdline.txt"
   output=$(PATH="$idbin:$PATH" bash -c '
     source "$1"
-    mountpoint() { return 1; }
     err() { echo "ERROR: $*"; }
     omarchy_rpi_disk=$2 omarchy_rpi_old_id=$(omarchy_rpi_disk_id "$2") omarchy_rpi_new_id=0badcafe omarchy_rpi_boot=/nonexistent
     omarchy_rpi_set_disk_id "$2" 0badcafe
-    run_latehook
-  ' bash "$scripts/initcpio-hook" "$disk" 2>&1) || fail "the late hook copes with a root it can't update" "$output"
+    run_latehook "$3"
+  ' bash "$scripts/initcpio-hook" "$disk" "$tmp/unmounted" 2>&1) || fail "the late hook copes with a root it can't update" "$output"
   [[ $(sfdisk --dump "$disk" | sed -n 's/^label-id: //p') == "0x$new" && $output == *"keeps its identifier"* &&
     $(<"$tmp/cmdline.txt") == "root=UUID=93f96c19 rw pimarchy.new_disk_id=8a70c72b" ]] ||
     fail "a new identifier fstab can't follow goes back, and cmdline.txt keeps the flag" "$output $(sfdisk --dump "$disk" | grep label-id)"
   pass "a new identifier fstab can't follow goes back to the old one, and the next boot tries again"
+
+  # mkinitcpio 42 mounts the root on /sysroot and makes /new_root a link to it;
+  # the late hook follows the link to the root's fstab and keeps the identifier.
+  mkdir -p "$tmp/sysroot/etc"
+  ln -s sysroot "$tmp/new_root"
+  printf '%s\n' "PARTUUID=$new-02  /  ext4  rw  0 1" "PARTUUID=$new-01  /boot  vfat  rw  0 2" >"$tmp/sysroot/etc/fstab"
+  output=$(PATH="$idbin:$PATH" bash -c '
+    source "$1"
+    mkdir() { :; }
+    mount() { return 1; }
+    err() { echo "ERROR: $*"; }
+    omarchy_rpi_disk=$2 omarchy_rpi_old_id=$(omarchy_rpi_disk_id "$2") omarchy_rpi_new_id=0badcafe omarchy_rpi_boot=/nonexistent
+    omarchy_rpi_set_disk_id "$2" 0badcafe
+    run_latehook "$3"
+  ' bash "$scripts/initcpio-hook" "$disk" "$tmp/new_root" 2>&1) || fail "the late hook updates a root mounted behind a link" "$output"
+  [[ $(sfdisk --dump "$disk" | sed -n 's/^label-id: //p') == "0x0badcafe" && $output == *"cannot mount /nonexistent"* &&
+    $(<"$tmp/sysroot/etc/fstab") == $'PARTUUID=0badcafe-02  /  ext4  rw  0 1\nPARTUUID=0badcafe-01  /boot  vfat  rw  0 2' ]] ||
+    fail "the root's fstab follows the new identifier through mkinitcpio's /new_root link, and the disk keeps it" \
+      "$output $(sfdisk --dump "$disk" | grep label-id) $(<"$tmp/sysroot/etc/fstab")"
+  pass "the late hook follows mkinitcpio 42's /new_root link to the root's fstab and keeps the new identifier"
 fi
