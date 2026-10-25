@@ -13,11 +13,14 @@
 # command line, and:
 #
 # - before the root is mounted, this picks the root: of the partitions with
-#   that UUID (every card from the image has it), the one on a disk that still
-#   carries the image's identifier, so a card renewed before can't stand in for
-#   a new one. It writes a random identifier into that disk's MBR, has the
-#   kernel read the partition table again, and mounts the root by its device
-#   for this boot (and checks it), before udev or systemd in the root see it;
+#   that UUID (every card from the image has it), the one on a card whose
+#   cmdline.txt still carries the flag. A card renewed before has dropped it,
+#   so it can't stand in for this one; a card whose first boot was cut short
+#   keeps it. This waits for that card as mkinitcpio waits for a root that
+#   shows up late (a USB disk can), writes a random identifier into its MBR,
+#   has the kernel read the partition table again, and mounts the root by its
+#   device for this boot (and checks it), before udev or systemd in the root
+#   see it;
 # - once the root is mounted, it points fstab's / and /boot at the new
 #   PARTUUIDs, then commits: cmdline.txt names the root by its new PARTUUID and
 #   drops the flag, written to a temporary file and renamed over the original.
@@ -46,6 +49,63 @@ omarchy_rpi_disk_of() {
     [ "$(cat "/sys/class/block/$name/partition" 2>/dev/null)" = "2" ] || return 1
     disk=$(readlink -f "/sys/class/block/$name/..") || return 1
     printf '/dev/%s\n' "${disk##*/}"
+}
+
+# Partition 1 of disk $1, where its cmdline.txt is.
+omarchy_rpi_part1() {
+    local entry
+
+    for entry in /sys/class/block/"${1##*/}"/*/partition; do
+        if [ "$(cat "$entry" 2>/dev/null)" = "1" ]; then
+            entry=${entry%/partition}
+            printf '/dev/%s\n' "${entry##*/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Whether cmdline.txt $1 carries pimarchy.new_disk_id=$2 on the line the
+# firmware reads.
+omarchy_rpi_has_flag() {
+    local line="" token
+
+    IFS= read -r line <"$1" || [ -n "$line" ] || return 1
+    line=${line%"$(printf '\r')"}
+    set -f
+    for token in $line; do
+        if [ "$token" = "pimarchy.new_disk_id=$2" ]; then
+            set +f
+            return 0
+        fi
+    done
+    set +f
+    return 1
+}
+
+# Of the partitions root= $1 names, the first that is partition 2 of a card
+# whose partition 1, mounted read-only on $3, has a cmdline.txt carrying
+# pimarchy.new_disk_id=$2: a card whose first boot hasn't committed.
+omarchy_rpi_pick() {
+    local candidate disk boot flagged
+
+    for candidate in $(blkid -c /dev/null -o device -t "$1" 2>/dev/null); do
+        candidate=$(readlink -f "$candidate") || continue
+        disk=$(omarchy_rpi_disk_of "$candidate") || continue
+        boot=$(omarchy_rpi_part1 "$disk") || continue
+        mkdir -p "$3"
+        mount -t vfat -o ro,iocharset=ascii "$boot" "$3" 2>/dev/null || continue
+        flagged=no
+        if omarchy_rpi_has_flag "$3/cmdline.txt" "$2"; then
+            flagged=yes
+        fi
+        umount "$3"
+        if [ "$flagged" = "yes" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Writes identifier $2 (eight hex digits, as sfdisk prints it) into MBR disk $1.
@@ -103,7 +163,7 @@ omarchy_rpi_cmdline() {
 }
 
 run_hook() {
-    local token image_id="" device candidate disk boot entry old new
+    local token image_id="" tries device disk boot old new
 
     set -f
     for token in $(cat /proc/cmdline); do
@@ -114,41 +174,31 @@ run_hook() {
     set +f
     [ -n "$image_id" ] || return 0
 
-    # A root that appeared after udev settled resolves to its /dev/disk/by-*
-    # link.
-    if ! device=$(resolve_device "$root") || ! device=$(readlink -f "$device"); then
-        err "omarchy-rpi-disk-id: cannot find the root ($root), so the disk keeps its identifier"
-        return 0
-    fi
-    for candidate in $(blkid -c /dev/null -o device -t "$root" 2>/dev/null); do
-        candidate=$(readlink -f "$candidate") || continue
-        disk=$(omarchy_rpi_disk_of "$candidate") || continue
-        if [ "$(omarchy_rpi_disk_id "$disk")" = "$image_id" ]; then
-            device=$candidate
-            break
+    # A card on USB can show up after udev settles, so this looks again every
+    # half second for as long as mkinitcpio waits for a root (rootdelay, 10
+    # seconds unless set).
+    tries=$(getarg rootdelay 10)
+    case $tries in
+        "" | *[!0-9]*) tries=10 ;;
+    esac
+    tries=$((tries * 2))
+    until device=$(omarchy_rpi_pick "$root" "$image_id" /run/omarchy-rpi-disk-id); do
+        if [ "$tries" -le 0 ]; then
+            err "omarchy-rpi-disk-id: no card with the root ($root) has pimarchy.new_disk_id=$image_id in its cmdline.txt, so none gets a new identifier"
+            return 0
         fi
+        tries=$((tries - 1))
+        sleep 0.5
     done
     # This boot mounts and checks the partition picked, whatever happens next.
     root=$device
     sed -i "s|^root=.*|root=$device|" /tmp/cmdline 2>/dev/null || true
 
-    if ! disk=$(omarchy_rpi_disk_of "$device"); then
-        err "omarchy-rpi-disk-id: $device is not partition 2 of a disk, so the disk keeps its identifier"
+    if ! disk=$(omarchy_rpi_disk_of "$device") || ! boot=$(omarchy_rpi_part1 "$disk"); then
         return 0
     fi
     if [ "$(dd if="$disk" bs=1 skip=510 count=2 2>/dev/null | hexdump -v -e '/1 "%02x"')" != "55aa" ]; then
         err "omarchy-rpi-disk-id: $disk has no MBR partition table, so it keeps its identifier"
-        return 0
-    fi
-    boot=""
-    for entry in /sys/class/block/"${disk##*/}"/*/partition; do
-        if [ "$(cat "$entry" 2>/dev/null)" = "1" ]; then
-            entry=${entry%/partition}
-            boot=/dev/${entry##*/}
-        fi
-    done
-    if [ -z "$boot" ]; then
-        err "omarchy-rpi-disk-id: $disk has no partition 1 holding cmdline.txt, so it keeps its identifier"
         return 0
     fi
 

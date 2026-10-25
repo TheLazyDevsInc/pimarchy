@@ -775,3 +775,34 @@ else
       "$output $(sfdisk --dump "$disk" | grep label-id) $(<"$tmp/sysroot/etc/fstab")"
   pass "the late hook follows mkinitcpio 42's /new_root link to the root's fstab and keeps the new identifier"
 fi
+
+# The hook renews the card whose cmdline.txt still carries the image's flag,
+# whatever its MBR says and wherever the kernel lists it: a card from the same
+# image renewed before, listed first, can't stand in for it, and with no such
+# card none is renewed. Partitions and boot volumes come from stand-ins here.
+picks=$tmp/picks
+mkdir -p "$picks"
+printf 'root=PARTUUID=5eed0001-02 rw rootwait quiet\n' >"$picks/sda1.txt"
+printf 'root=UUID=93f96c19 rw rootwait quiet pimarchy.new_disk_id=8a70c72b\r\n' >"$picks/mmcblk0p1.txt"
+pick() {
+  bash -c '
+    source "$1"
+    candidates=$2 picks=$3
+    blkid() { printf "%s\n" $candidates; }
+    omarchy_rpi_disk_of() { printf "%s\n" "${1%[0-9]}"; }
+    omarchy_rpi_part1() { printf "%s1\n" "$1"; }
+    mount() { cp "$picks/${5##*/}.txt" "$6/cmdline.txt"; }
+    umount() { rm -f "$1/cmdline.txt"; }
+    omarchy_rpi_pick UUID=93f96c19 8a70c72b "$picks/mnt"
+  ' bash "$scripts/initcpio-hook" "$1" "$picks"
+}
+output=$(pick "/dev/sda2 /dev/mmcblk0p2" 2>&1) && [[ $output == "/dev/mmcblk0p2" ]] ||
+  fail "the hook picks the card whose cmdline.txt carries the flag, not a renewed card listed first" "$output"
+if output=$(pick "/dev/sda2" 2>&1); then
+  fail "with no card carrying the flag the hook renews none" "$output"
+fi
+printf 'root=UUID=93f96c19 rw pimarchy.new_disk_id=0badc0de\nroot=UUID=93f96c19 pimarchy.new_disk_id=8a70c72b\n' >"$picks/mmcblk0p1.txt"
+if output=$(pick "/dev/mmcblk0p2" 2>&1); then
+  fail "only the firmware's line of cmdline.txt, carrying this image's identifier, counts" "$output"
+fi
+pass "the hook renews the card whose cmdline.txt carries the image's flag, and no card renewed before"
