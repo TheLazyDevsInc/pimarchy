@@ -83,13 +83,22 @@ omarchy_rpi_has_flag() {
     return 1
 }
 
+# The partitions root= $1 names: every one a tag matches, or the device it
+# names.
+omarchy_rpi_candidates() {
+    case $1 in
+        /dev/*) printf '%s\n' "$1" ;;
+        *=*) blkid -c /dev/null -o device -t "$1" 2>/dev/null ;;
+    esac
+}
+
 # Of the partitions root= $1 names, the first that is partition 2 of a card
 # whose partition 1, mounted read-only on $3, has a cmdline.txt carrying
 # pimarchy.new_disk_id=$2: a card whose first boot hasn't committed.
 omarchy_rpi_pick() {
     local candidate disk boot flagged
 
-    for candidate in $(blkid -c /dev/null -o device -t "$1" 2>/dev/null); do
+    for candidate in $(omarchy_rpi_candidates "$1"); do
         candidate=$(readlink -f "$candidate") || continue
         disk=$(omarchy_rpi_disk_of "$candidate") || continue
         boot=$(omarchy_rpi_part1 "$disk") || continue
@@ -181,7 +190,10 @@ run_hook() {
     case $tries in
         "" | *[!0-9]*) tries=10 ;;
     esac
-    tries=$((tries * 2))
+    # Read as decimal: ash takes a leading 0 for octal, and an arithmetic error
+    # here would end init itself.
+    tries=${tries#"${tries%%[!0]*}"}
+    tries=$((${tries:-0} * 2))
     until device=$(omarchy_rpi_pick "$root" "$image_id" /run/omarchy-rpi-disk-id); do
         if [ "$tries" -le 0 ]; then
             err "omarchy-rpi-disk-id: no card with the root ($root) has pimarchy.new_disk_id=$image_id in its cmdline.txt, so none gets a new identifier"
