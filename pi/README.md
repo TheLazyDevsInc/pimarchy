@@ -115,7 +115,7 @@ Under the proot runner, a few pacman runs in a hundred die of a heap corruption 
 
 ### Booting an image under QEMU
 
-QEMU 9.0 and newer emulate the Pi 4's SoC as the `raspi4b` machine, which is enough to run an image's first boot without a Pi: the root grows, the deferred hardware setup runs, the initramfs is rebuilt and the owner wizard starts on tty1. QEMU emulates no GPU, USB, network, Wi-Fi or Bluetooth for this board, so Hyprland never starts, and its SD card must be a power of two in size. Ubuntu 24.04's QEMU is 8.2, so build QEMU 10 with `./configure --target-list=aarch64-softmmu` there.
+QEMU 9.0 and newer emulate the Pi 4's SoC as the `raspi4b` machine, which is enough to run an image's first boot without a Pi: the root grows, the deferred hardware setup runs, the initramfs is rebuilt and the owner wizard starts on tty1. QEMU emulates no GPU, Wi-Fi or Bluetooth for this board, so Hyprland never starts, and its SD card must be a power of two in size. Ubuntu 24.04's QEMU is 8.2, so build QEMU 10 with `./configure --target-list=aarch64-softmmu` there.
 
 The Pi's console is the mini UART, which QEMU can't drive, and the PL011 belongs to Bluetooth, so the test copy of the device tree drops the Bluetooth node and swaps the two UARTs' aliases with `fdtput` (from `dtc`, Debian's `device-tree-compiler`), so the PL011 is `serial0` and `ttyAMA0`. The firmware never runs: QEMU loads the kernel, device tree and initramfs itself, and a debug shell on the serial console stands in for a login, since the image has none. Work on a copy, since the first boot changes it:
 
@@ -133,6 +133,19 @@ qemu-system-aarch64 -M raspi4b -nographic -serial mon:stdio \
 ```
 
 The command line is the image's own `cmdline.txt`, which the firmware would pass, with a serial console and boot messages added after it, so the first boot gives the card its own disk identifier as on a Pi. The first boot takes about fifteen minutes under emulation on an x86_64 host. `journalctl -u omarchy-rpi-grow-root -u omarchy-provision-hardware` in the debug shell shows what it did, and `omarchy-lifecycle-dispatch update-verify` checks the boot files. `systemctl poweroff` halts the board, since QEMU can't cut its power; quit QEMU with Ctrl-A X once it has. To boot the result again, copy the initramfs the first boot rebuilt out of the image (`mcopy -o -i test.img@@1M ::initramfs-linux.img .`) first; the same command reads the `cmdline.txt` the first boot rewrote.
+
+QEMU does emulate the SoC's dwc2 USB controller, which the device tree leaves off. Turned on with the upstream binding, it takes a keyboard for the owner wizard, a second disk (to try two cards from one image) and a network adapter, and QMP types on that keyboard and captures the framebuffer console tty1 shows the wizard on:
+
+```bash
+fdtput -t s bcm2711-rpi-400.dtb /soc/usb@7e980000 status okay
+fdtput -t s bcm2711-rpi-400.dtb /soc/usb@7e980000 compatible brcm,bcm2835-usb
+fdtput -t s bcm2711-rpi-400.dtb /soc/usb@7e980000 dr_mode host
+# In the command above, -display none -qmp unix:qmp.sock,server=on,wait=off in place of -nographic, and:
+#   -device usb-kbd -netdev user,id=n0 -device usb-net,netdev=n0
+#   -device usb-storage,drive=usbdisk -drive if=none,id=usbdisk,file=second.img,format=raw
+```
+
+QMP's `send-key` command presses keys on that keyboard and `screendump` (with `"format": "png"`) saves the screen.
 
 ## Flashing
 
