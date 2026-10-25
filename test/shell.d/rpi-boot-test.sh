@@ -800,9 +800,12 @@ pick() {
 }
 output=$(pick UUID=93f96c19 "/dev/sda2 /dev/mmcblk0p2" 2>&1) && [[ $output == "/dev/mmcblk0p2" ]] ||
   fail "the hook picks the card whose cmdline.txt carries the flag, not a renewed card listed first" "$output"
-if output=$(pick UUID=93f96c19 "/dev/sda2" 2>&1); then
-  fail "with no card carrying the flag the hook renews none" "$output"
-fi
+status=0
+output=$(pick UUID=93f96c19 "/dev/sda2" 2>&1) || status=$?
+(( status == 2 )) || fail "with only cards without the flag the hook renews none, and says it saw them" "$status $output"
+status=0
+output=$(pick UUID=93f96c19 "" 2>&1) || status=$?
+(( status == 1 )) || fail "with no card at all the hook renews none" "$status $output"
 output=$(pick /dev/mmcblk0p2 "/dev/sda2" 2>&1) && [[ $output == "/dev/mmcblk0p2" ]] ||
   fail "a root= naming a device picks that partition's card" "$output"
 printf 'root=UUID=93f96c19 rw pimarchy.new_disk_id=0badc0de\nroot=UUID=93f96c19 pimarchy.new_disk_id=8a70c72b\n' >"$picks/mmcblk0p1.txt"
@@ -827,3 +830,26 @@ output=$(bash -c '
 [[ $output == *"none gets a new identifier"* && $output == *"waited 16 half seconds" ]] ||
   fail "the hook waits rootdelay=08 seconds for the flagged card and then gives up" "$output"
 pass "the hook waits rootdelay, read as decimal, for the flagged card"
+
+# When it gives up having seen only cards without the flag, a root= tag they
+# share would have mkinitcpio mount one of them: the boot waits for the image's
+# own root partition instead. Without such cards, or with a root= naming a
+# device, root= stays.
+gave_up() {
+  bash -c '
+    source "$1"
+    root=$2 picked=$3
+    getarg() { echo 0; }
+    cat() { echo "root=$root pimarchy.new_disk_id=8a70c72b"; }
+    omarchy_rpi_pick() { return "$picked"; }
+    err() { :; }
+    sed() { :; }
+    run_hook
+    echo "$root"
+  ' bash "$scripts/initcpio-hook" "$1" "$2"
+}
+[[ $(gave_up UUID=93f96c19 2) == "PARTUUID=8a70c72b-02" && $(gave_up UUID=93f96c19 1) == "UUID=93f96c19" &&
+  $(gave_up /dev/sda2 2) == "/dev/sda2" ]] ||
+  fail "a boot that saw only cards without the flag waits for the image's own root" \
+    "$(gave_up UUID=93f96c19 2) $(gave_up UUID=93f96c19 1) $(gave_up /dev/sda2 2)"
+pass "a boot that saw only cards without the flag waits for the image's own root, not theirs"

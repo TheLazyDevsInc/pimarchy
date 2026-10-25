@@ -25,6 +25,10 @@
 #   PARTUUIDs, then commits: cmdline.txt names the root by its new PARTUUID and
 #   drops the flag, written to a temporary file and renamed over the original.
 #
+# When the card doesn't show up and only cards renewed before did, this boot
+# waits for the image's own root, PARTUUID=<the image's identifier>-02, which
+# none of them has, rather than mount one of them by the UUID they share.
+#
 # Until that rename, cmdline.txt still names the root's UUID and the flag, so a
 # power cut anywhere before it means the next boot does it all again, with
 # another identifier; setup-boot leaves root= alone while the flag is there. A
@@ -94,9 +98,10 @@ omarchy_rpi_candidates() {
 
 # Of the partitions root= $1 names, the first that is partition 2 of a card
 # whose partition 1, mounted read-only on $3, has a cmdline.txt carrying
-# pimarchy.new_disk_id=$2: a card whose first boot hasn't committed.
+# pimarchy.new_disk_id=$2: a card whose first boot hasn't committed. Fails with
+# 2 when it found cards with that root but none carrying the flag.
 omarchy_rpi_pick() {
-    local candidate disk boot flagged
+    local candidate disk boot flagged status=1
 
     for candidate in $(omarchy_rpi_candidates "$1"); do
         candidate=$(readlink -f "$candidate") || continue
@@ -113,8 +118,9 @@ omarchy_rpi_pick() {
             printf '%s\n' "$candidate"
             return 0
         fi
+        status=2
     done
-    return 1
+    return "$status"
 }
 
 # Writes identifier $2 (eight hex digits, as sfdisk prints it) into MBR disk $1.
@@ -172,7 +178,7 @@ omarchy_rpi_cmdline() {
 }
 
 run_hook() {
-    local token image_id="" tries device disk boot old new
+    local token image_id="" tries others device disk boot old new
 
     set -f
     for token in $(cat /proc/cmdline); do
@@ -194,9 +200,26 @@ run_hook() {
     # here would end init itself.
     tries=${tries#"${tries%%[!0]*}"}
     tries=$((${tries:-0} * 2))
-    until device=$(omarchy_rpi_pick "$root" "$image_id" /run/omarchy-rpi-disk-id); do
+    others=no
+    while :; do
+        device=$(omarchy_rpi_pick "$root" "$image_id" /run/omarchy-rpi-disk-id)
+        case $? in
+            0) break ;;
+            2) others=yes ;;
+        esac
         if [ "$tries" -le 0 ]; then
             err "omarchy-rpi-disk-id: no card with the root ($root) has pimarchy.new_disk_id=$image_id in its cmdline.txt, so none gets a new identifier"
+            # Only cards renewed before showed up, and mkinitcpio would mount
+            # one of them by the root's UUID they share: this boot waits for
+            # the image's own root instead, which none of them has.
+            case $others,$root in
+                yes,/dev/*) ;;
+                yes,*)
+                    root=PARTUUID=$image_id-02
+                    sed -i "s|^root=.*|root=$root|" /tmp/cmdline 2>/dev/null || true
+                    err "omarchy-rpi-disk-id: the root is $root for this boot, which no card renewed before has"
+                    ;;
+            esac
             return 0
         fi
         tries=$((tries - 1))
