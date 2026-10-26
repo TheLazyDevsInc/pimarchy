@@ -88,6 +88,40 @@ jobs:
           sudo pi/build-image --output "$WORK/out" --cache "$WORK/cache" --ref "$BRANCH" --channel "$CHANNEL"
           sudo chown -R "$(id -u):$(id -g)" "$WORK/out"
 
+      # A single file at a public URL, for flashing straight from it (balenaEtcher's
+      # "Flash from URL"), when the repository names a Cloudflare R2 bucket: the
+      # variables R2_BUCKET and R2_PUBLIC_URL (the bucket's public r2.dev or custom
+      # domain address), and the secrets R2_ENDPOINT
+      # (https://<account id>.r2.cloudflarestorage.com), R2_ACCESS_KEY_ID and
+      # R2_SECRET_ACCESS_KEY (an R2 API token that can write the bucket). The image
+      # goes up under its own name and as pimarchy-latest-<channel>.img.xz.
+      - name: Upload the image to Cloudflare R2
+        if: ${{ vars.R2_BUCKET != '' }}
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+        run: |
+          cd "$WORK/out"
+          image=$(ls pimarchy-*.img.xz)
+          latest=pimarchy-latest-$CHANNEL.img.xz
+          sed "s/  $image\$/  $latest/" "$image.sha256" >"$latest.sha256"
+          # Credentials go to curl on its standard input, never its command line.
+          upload() {
+            printf 'user = "%s:%s"\n' "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY" |
+              curl --config - --fail-with-body -sS --retry 3 --aws-sigv4 "aws:amz:auto:s3" \
+                -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" -T "$1" "${R2_ENDPOINT%/}/$R2_BUCKET/$2"
+          }
+          upload "$image" "$image"
+          upload "$image.sha256" "$image.sha256"
+          upload "$image" "$latest"
+          upload "$latest.sha256" "$latest.sha256"
+          rm -f "$latest.sha256"
+          echo "R2_URL=${R2_PUBLIC_URL%/}/$image" >>"$GITHUB_ENV"
+          echo "R2_LATEST_URL=${R2_PUBLIC_URL%/}/$latest" >>"$GITHUB_ENV"
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -106,6 +140,10 @@ jobs:
           {
             echo "Pimarchy for the Raspberry Pi 400, built from $GITHUB_SHA on \`$BRANCH\` ($CHANNEL channel)."
             echo
+            if [[ -n ${R2_URL:-} ]]; then
+              echo "**Flash from URL**: give balenaEtcher's \"Flash from URL\" $R2_URL, or download it in one piece from there. The newest $CHANNEL image is always at $R2_LATEST_URL."
+              echo
+            fi
             echo "The image is attached in ${#parts[@]} parts, since a release file can't be over 2 GiB. Download every \`$image.part*\` file and \`$image.sha256\` into one folder, then join and check them (macOS or Linux):"
             echo
             echo '```bash'
@@ -114,6 +152,8 @@ jobs:
             echo '```'
             echo
             echo "Flash \`$image\` with Raspberry Pi Imager (Raspberry Pi 400, Use Custom, and No to OS customisation) or \`xzcat $image | sudo dd of=/dev/sdX bs=4M conv=fsync\`. See [pi/README.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/pi/README.md) for the first boot."
+            echo
+            echo "No screen or keyboard? After flashing, fill in \`pimarchy.txt\` on the card's \`BOOT\` partition with your Wi-Fi, account and SSH key, and the first boot sets the Pi up on its own; then \`ssh <user>@<hostname>.local\` reaches it ([Without a screen](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/pi/README.md#without-a-screen))."
             echo
             echo "sha256 of \`$image\`: \`$(cut -d' ' -f1 "$image.sha256")\`"
           } >notes.md
