@@ -176,7 +176,7 @@ The Pi has no battery-backed clock, so until it reaches the network its clock st
 
 ### Without a screen
 
-A Pi with no screen or keyboard is set up from `pimarchy.txt` on the card's boot partition instead, as DietPi's `dietpi.txt` sets one up. After flashing, take the card out and put it back in: its boot partition, `BOOT`, opens on Windows, macOS and Linux. Open `pimarchy.txt` in a plain text editor, delete the `#` in front of each setting you want, and put your value after its `=`:
+A Pi with no screen or keyboard is set up from `pimarchy.txt` on the card's boot partition instead, as DietPi's `dietpi.txt` sets one up. After flashing, take the card out and put it back in: its boot partition, `BOOT`, opens on Windows, macOS and Linux. Open `pimarchy.txt` in a plain text editor, put your value after the `=` of each setting you want, leave the others empty, and save it as plain text:
 
 ```ini
 WIFI_SSID=Home network
@@ -190,9 +190,9 @@ KEYBOARD=uk
 SSH_KEY=ssh-ed25519 AAAAC3Nza... ada@laptop
 ```
 
-On its first boot, before the network starts, the Pi reads the file. It sets its Wi-Fi country and joins the network, takes its name and timezone, turns SSH on with port 22 open in the firewall (rate limited), and leaves your account to the setup screen, which then runs on its own with nobody at the Pi. With an `SSH_KEY`, password logins over SSH are off unless `SSH_PASSWORD_LOGIN=yes`. The file's passwords are then blanked where they lie, and `pimarchy-status.txt` beside it lists what was applied and what was skipped, and why. A few minutes after power on, `ssh ada@pi400.local` reaches the Pi; if your computer doesn't resolve `.local` names, find the Pi's address in your router's list of devices. Over Ethernet, leave the Wi-Fi settings out.
+On its first boot, before the network starts, the Pi reads the file. It sets its Wi-Fi country and joins the network, takes its name and timezone, turns SSH on with port 22 open in the firewall (rate limited), and leaves your account to the setup screen, which then runs on its own with nobody at the Pi. With an `SSH_KEY`, password logins over SSH are off unless `SSH_PASSWORD_LOGIN=yes`. The file's passwords are then blanked where they lie, together with any line it couldn't read, which might hold one. `pimarchy-status.txt` beside it lists what was applied and what was skipped, and why. A few minutes after power on, `ssh ada@pi400.local` reaches the Pi; if your computer doesn't resolve `.local` names, find the Pi's address in your router's list of devices. Over Ethernet, leave the Wi-Fi settings empty.
 
-`PASSWORD_HASH` takes the password's hash, from `openssl passwd -6`, so the card never holds the password itself. A setting the setup screen wouldn't take, such as a reserved username or a timezone with no such name, is skipped and reported, and without an account the setup screen asks at the Pi as usual. The file is read only while first-boot setup is pending, so editing it after that changes nothing.
+`PASSWORD_HASH` takes the password's hash, from `openssl passwd -6`, so the card never holds the password itself. A setting the setup screen wouldn't take, such as a username the image already has or a timezone with no such name, is skipped and reported, and without an account the setup screen asks at the Pi as usual. A file saved as UTF-16 (Windows PowerShell's `>` does that) is reported and left unused, passwords and all, until it is saved as plain text. The Pi reads the file until it has set up its account, so after a boot that went wrong, fix the file and boot again: what an earlier boot set up stays, and a new network or account needs its password again. Once the account exists, the file is no longer read; if the Pi didn't join your Wi-Fi by then, connect it to your router with a cable, which needs no setup, and reach it over SSH to fix the network (`nmcli device wifi connect "<network>" --ask`).
 
 ## Updates on the Pi
 

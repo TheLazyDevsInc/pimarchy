@@ -682,7 +682,8 @@ pass "the grow-root unit runs grow-root in early boot while its marker exists, a
 # ── headless ─────────────────────────────────────────────────────────────────
 
 # A first boot still pending, with the owner form's rules, two of the countries
-# wireless-regdb lists, a timezone, and the image's pimarchy.txt on /boot.
+# wireless-regdb lists, a timezone and a zoneinfo file that is none, a system
+# account, and the image's pimarchy.txt on /boot.
 settings=$root/boot/pimarchy.txt
 status_file=$root/boot/pimarchy-status.txt
 provisioning=$root/var/lib/omarchy/provisioning
@@ -694,13 +695,15 @@ reset_headless() {
   : >"$provisioning/pending"
   cp "$ROOT/install/provisioning/setup-form.sh" "$root/usr/share/omarchy/install/provisioning/"
   printf '%s\n' '#WIRELESS_REGDOM="DE"' '#WIRELESS_REGDOM="GB"' >"$root/etc/conf.d/wireless-regdom"
-  : >"$root/usr/share/zoneinfo/Europe/London"
+  touch "$root/usr/share/zoneinfo/Europe/London" "$root/usr/share/zoneinfo/posixrules"
+  printf '%s\n' '# tzdata.zi' 'Z Europe/London -0:1:15 - LMT 1847 D' 'L Europe/London GB' >"$root/usr/share/zoneinfo/tzdata.zi"
+  printf '%s\n' 'root:x:0:0::/root:/bin/bash' 'sys:x:3:3::/:/usr/bin/nologin' >"$root/etc/passwd"
   echo omarchy | tee "$root/etc/hostname" >"$root/proc/sys/kernel/hostname"
   cp "$scripts/pimarchy.txt" "$settings"
   chmod -R go-w "$root"
 }
 
-# As the image ships it, every setting commented out: nothing happens.
+# As the image ships it, every setting empty: nothing happens.
 reset_headless
 before=$(fingerprint)
 output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with the image's pimarchy.txt" "$output"
@@ -709,10 +712,11 @@ pass "pimarchy.txt as the image ships it changes nothing"
 
 # Filled in on Windows: a byte order mark, CRLF line ends, a lower-case key,
 # spaces around an "=", and quotes keeping a password's own spaces.
+# NetworkManager takes a passphrase in UTF-8, so one beyond ASCII works too.
 reset_headless
 {
   printf '\xef\xbb\xbf# Filled in on Windows\r\n'
-  printf '%s\r\n' 'WIFI_SSID = Café;Net' 'wifi_password=" s3cret\pass "' 'WIFI_COUNTRY=gb' 'WIFI_HIDDEN=Yes' \
+  printf '%s\r\n' 'WIFI_SSID = Café;Net' 'wifi_password=" s3crét\pass "' 'WIFI_COUNTRY=gb' 'WIFI_HIDDEN=Yes' \
     'USERNAME=pi4' 'PASSWORD=hunter2!' 'FULL_NAME=Ada Lovelace' 'EMAIL=ada@example.com' 'HOSTNAME=pi400' \
     'TIMEZONE=Europe/London' 'KEYBOARD=uk' 'SSH_KEY=ssh-ed25519 AAAAC3Nz ada@laptop'
 } >"$settings"
@@ -731,7 +735,7 @@ hidden=true
 
 [wifi-security]
 key-mgmt=wpa-psk
-psk=\ss3cret\\pass\s
+psk=\ss3crét\\pass\s
 
 [ipv4]
 method=auto
@@ -752,7 +756,7 @@ method=auto' && $(stat -c %a "$profile") == "600" ]] ||
   fail "the key is staged for the account, and password logins go"
 grep -qx 'systemctl --no-reload enable sshd.service' "$calls" && grep -qx 'systemctl start --no-block sshd.service' "$calls" &&
   grep -qx 'ufw limit 22/tcp comment omarchy-sshd' "$calls" || fail "SSH is on and its port open" "$(cat "$calls")"
-[[ $(stat -c %s "$settings") == "$size" ]] && ! grep -q 'hunter2\|s3cret' "$settings" &&
+[[ $(stat -c %s "$settings") == "$size" ]] && ! grep -q 'hunter2\|s3cr' "$settings" &&
   (( $(grep -c $'^# *\r$' "$settings") == 2 )) && grep -q $'^WIFI_SSID = Café;Net\r$' "$settings" ||
   fail "the passwords are blanked in place, and nothing else in pimarchy.txt changes" "$(cat -A "$settings")"
 [[ $(<"$status_file") == *"ssh pi4@pi400.local"* && $(<"$status_file") != *Skipped* ]] ||
@@ -770,18 +774,32 @@ cmp -s "$profile" "$tmp/profile" && cmp -s "$provisioning/answers" "$tmp/answers
   fail "a rerun reports what an earlier boot set up" "$(cat "$status_file")"
 pass "a rerun after the passwords are blanked keeps the Wi-Fi profile and the account"
 
-# What the owner form wouldn't take is skipped and reported, and changes nothing.
+# A rerun that names another network or account, without its password, keeps
+# what the first boot set up and says so.
+sed -i -e 's/^WIFI_SSID = .*/WIFI_SSID=Other\r/' -e 's/^USERNAME=.*/USERNAME=ada\r/' "$settings"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs again with other names" "$output"
+cmp -s "$profile" "$tmp/profile" && cmp -s "$provisioning/answers" "$tmp/answers" ||
+  fail "a rerun naming another network or account keeps the first boot's"
+[[ $(<"$status_file") == *"- WIFI_SSID: an earlier boot set up another network"* &&
+  $(<"$status_file") == *"- USERNAME: an earlier boot set up the account pi4"* && $(<"$status_file") == *"ssh pi4@pi400.local"* ]] ||
+  fail "a rerun naming another network or account says the first boot's stay" "$(cat "$status_file")"
+pass "a rerun naming another network or account without its password keeps, and reports, what the first boot set up"
+
+# What the owner form wouldn't take is skipped and reported, and changes
+# nothing: an account the image has, a zoneinfo file timedated doesn't list.
+# Lines it can't read could hold a password, so they are blanked too.
 reset_headless
-printf '%s\n' 'WIFI_SSID=home' 'WIFI_PASSWORD=short' 'WIFI_COUNTRY=XX' 'USERNAME=root' 'PASSWORD=hunter2!' 'HOSTNAME=-bad-' \
-  'TIMEZONE=../../etc/passwd' 'KEYBOARD=klingon' 'SSH_KEY=not a key' 'COLOUR=blue' 'stray line' >"$settings"
+printf '%s\n' 'WIFI_SSID=home' 'WIFI_PASSWORD=short' 'WIFI_COUNTRY=XX' 'USERNAME=sys' 'PASSWORD=hunter2!' 'HOSTNAME=-bad-' \
+  'TIMEZONE=posixrules' 'KEYBOARD=klingon' 'SSH_KEY=not a key' 'WIFI_PASWORD=typo1234' 'secret on its own' >"$settings"
 output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with settings it can't use" "$output"
 [[ ! -e $profile && ! -e $provisioning/answers && ! -e $provisioning/authorized_keys && ! -e $root/etc/localtime &&
   ! -e $root/etc/ssh && $(<"$root/etc/hostname") == "omarchy" ]] || fail "settings it can't use change nothing"
 ! grep -q 'systemctl\|ufw\|set-wireless-regdom' "$calls" || fail "nothing turns on for settings it can't use" "$(cat "$calls")"
-for key in WIFI_PASSWORD WIFI_COUNTRY USERNAME HOSTNAME TIMEZONE KEYBOARD SSH_KEY COLOUR "a line that sets nothing"; do
-  [[ $(<"$status_file") == *"- $key:"* ]] || fail "the status file names $key as skipped" "$(cat "$status_file")"
+for key in WIFI_PASSWORD WIFI_COUNTRY USERNAME HOSTNAME TIMEZONE KEYBOARD SSH_KEY WIFI_PASWORD "a line with no"; do
+  [[ $(<"$status_file") == *"- $key"* ]] || fail "the status file names $key as skipped" "$(cat "$status_file")"
 done
-! grep -q 'hunter2\|short' "$settings" || fail "passwords are blanked even when unused"
+! grep -q 'hunter2\|short\|typo1234\|secret' "$settings" && grep -qx 'USERNAME=sys' "$settings" ||
+  fail "passwords and lines it can't read are blanked, even unused" "$(cat "$settings")"
 pass "settings the owner form wouldn't take are skipped, reported and change nothing"
 
 # A step that fails still blanks the passwords and says so.
@@ -793,6 +811,18 @@ output=$(on aarch64-rpi headless 2>&1) || status=$?
 (( status != 0 )) && ! grep -q password1 "$settings" && [[ $(<"$status_file") == *"setup stopped at an error"* ]] ||
   fail "a failed step still blanks the passwords and reports the error" "status $status: $output"
 pass "a run that fails partway still blanks the passwords and reports the error"
+
+# A file saved as UTF-16 parses with its NUL bytes dropped, but can't be blanked
+# line by line: it is used for nothing, and kept as its owner wrote it.
+reset_headless
+printf 'WIFI_SSID=home\r\nWIFI_PASSWORD=password1\r\n' | iconv -f UTF-8 -t UTF-16 >"$settings"
+cp "$settings" "$tmp/utf16"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with a UTF-16 pimarchy.txt" "$output"
+cmp -s "$settings" "$tmp/utf16" && [[ ! -e $profile && ! -s $calls ]] ||
+  fail "a UTF-16 pimarchy.txt changes nothing" "$(cat "$calls")"
+[[ $(<"$status_file") == *"pimarchy.txt: unread, since it holds NUL bytes"* ]] ||
+  fail "the status file says to save pimarchy.txt as plain text" "$(cat "$status_file")"
+pass "a pimarchy.txt saved as UTF-16 is used for nothing, kept, and reported"
 
 # Once first-boot setup is done, pimarchy.txt is left alone.
 reset_headless

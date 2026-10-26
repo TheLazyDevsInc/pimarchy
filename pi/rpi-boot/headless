@@ -7,8 +7,8 @@
 # An image is set up at its screen, by the owner wizard on tty1. A Pi with no
 # screen or keyboard gets its settings from pimarchy.txt on the FAT boot
 # partition instead, which its owner fills in on the computer that flashed the
-# card (the image ships it with every setting commented out). Before
-# NetworkManager and Avahi start, this:
+# card (the image ships every setting in it empty). Before NetworkManager and
+# Avahi start, this:
 #
 # - sets the Wi-Fi radio's country and gives NetworkManager a profile for the
 #   owner's network;
@@ -18,14 +18,14 @@
 #   nobody at the screen (bin/omarchy-provision-owner), and stages the owner's
 #   SSH keys for it;
 # - turns SSH on, with password logins off once there is a key;
-# - blanks the passwords in pimarchy.txt where they lie, and writes what it did
-#   to pimarchy-status.txt beside it.
+# - blanks the passwords in pimarchy.txt where they lie, with every line it
+#   could not use, and writes what it did to pimarchy-status.txt beside it.
 #
 # The file is read as data, never sourced, and checked by the owner form's own
-# rules (install/provisioning/setup-form.sh). A setting this can't use is
-# skipped and reported. Without an account the owner wizard asks at the screen
-# as before, and a Wi-Fi profile or account staged by an earlier run stays when
-# a rerun finds its passwords blanked.
+# rules (install/provisioning/setup-form.sh), so owner setup takes whatever this
+# stages. A setting this can't use is skipped and reported. Without an account
+# the owner wizard asks at the screen as before, and a Wi-Fi profile or account
+# staged by an earlier run stays when a rerun finds its passwords blanked.
 #
 # The unit runs this with nothing in its environment but a fixed PATH, so it
 # uses fixed paths and checks the platform itself. An unprivileged test may name
@@ -39,7 +39,8 @@ fi
 set -euo pipefail
 shopt -s inherit_errexit
 umask 077
-# Lengths below are in bytes, as an SSID's and a password's limits are.
+# Lengths below are in bytes, as an SSID's and a password's limits are, and as
+# blanking a line in place needs.
 export LC_ALL=C
 
 fail() {
@@ -69,14 +70,16 @@ fi
 settings=$fixture/boot/pimarchy.txt
 report=$fixture/boot/pimarchy-status.txt
 provisioning=$fixture/var/lib/omarchy/provisioning
+answers=$provisioning/answers
 form=$fixture/usr/share/omarchy/install/provisioning/setup-form.sh
 regdom=$fixture/etc/conf.d/wireless-regdom
 connections=$fixture/etc/NetworkManager/system-connections
 profile=$connections/pimarchy-wifi.nmconnection
 hardening=$fixture/etc/ssh/sshd_config.d/10-omarchy-hardening.conf
 zoneinfo=$fixture/usr/share/zoneinfo
+passwd=$fixture/etc/passwd
 
-# First-boot setup is done, or the owner left the file out.
+# First-boot setup is done, or the owner deleted the file.
 [[ -f $provisioning/pending ]] || exit 0
 [[ -f $settings && ! -L $settings ]] || exit 0
 
@@ -96,6 +99,18 @@ fi
 OMARCHY_FORM_DEFAULTS=$fixture/etc/omarchy/form-defaults
 source "$form"
 
+settings_keys=" WIFI_SSID WIFI_PASSWORD WIFI_COUNTRY WIFI_HIDDEN USERNAME PASSWORD PASSWORD_HASH FULL_NAME EMAIL HOSTNAME TIMEZONE KEYBOARD SSH_KEY SSH_PASSWORD_LOGIN "
+secret_keys=" WIFI_PASSWORD PASSWORD PASSWORD_HASH "
+
+declare -A setting=()
+ssh_keys=()
+skipped=()
+applied=()
+# The account owner setup will create, and the hostname it will give the
+# machine, for the status file's ssh command.
+account=""
+account_host=""
+
 # Sets the variable named $1 to $2 without leading or trailing whitespace.
 trim() {
   local text=$2
@@ -104,8 +119,9 @@ trim() {
   printf -v "$1" '%s' "${text%"${text##*[![:space:]]}"}"
 }
 
-# The setting a line sets: its key in capitals, or nothing for a blank line or a
-# comment. A UTF-8 byte order mark and a CR, as a Windows editor leaves them, go.
+# The setting a line sets: its key in capitals, or nothing for a blank line, a
+# comment or a line with no "=". A UTF-8 byte order mark and a CR, as a Windows
+# editor leaves them, go.
 line_key() {
   local line=${1#$'\xef\xbb\xbf'}
 
@@ -115,76 +131,72 @@ line_key() {
   printf '%s' "${line^^}"
 }
 
-# ── Reading pimarchy.txt ─────────────────────────────────────────────────────
+# The value a setting line gives, trimmed: quotes around it keep its own
+# leading and trailing spaces.
+line_value() {
+  local value=${1#*=}
 
-declare -A setting=()
-ssh_keys=()
-skipped=()
-applied=()
-secrets=(WIFI_PASSWORD PASSWORD PASSWORD_HASH)
-
-while IFS= read -r line || [[ -n $line ]]; do
-  if ! key=$(line_key "$line"); then
-    trim line "${line#$'\xef\xbb\xbf'}"
-    line=${line%$'\r'}
-    [[ -z $line || $line == \#* ]] || skipped+=("a line that sets nothing: no \"=\"")
-    continue
-  fi
-  value=${line#*=}
-  value=${value%$'\r'}
-  trim value "$value"
-  # Quotes keep a value's leading and trailing spaces.
+  trim value "${value%$'\r'}"
   if (( ${#value} >= 2 )) && [[ $value == \"*\" || $value == \'*\' ]]; then
     value=${value:1:${#value}-2}
   fi
-  case $key in
-    WIFI_SSID | WIFI_PASSWORD | WIFI_COUNTRY | WIFI_HIDDEN | USERNAME | PASSWORD | PASSWORD_HASH | FULL_NAME | EMAIL | \
-      HOSTNAME | TIMEZONE | KEYBOARD | SSH_PASSWORD_LOGIN)
-      setting[$key]=$value
-      ;;
-    SSH_KEY)
-      [[ -z $value ]] || ssh_keys+=("$value")
-      ;;
-    *)
-      skipped+=("$key: no such setting")
-      ;;
-  esac
-done <"$settings"
+  printf '%s' "$value"
+}
 
-# Every line still commented out, as the image ships it.
-if (( ${#setting[@]} == 0 && ${#ssh_keys[@]} == 0 && ${#skipped[@]} == 0 )); then
-  exit 0
-fi
+# Whether blanking keeps line $1: a comment, a blank line, or a setting this
+# knows that holds no password. A line it can't read could hold anything. It
+# runs from the exit trap, where a bare return gives the status from before the
+# trap, so every return names its own.
+keeps_line() {
+  local key line
 
-# ── Blanking the passwords and reporting ─────────────────────────────────────
+  if ! key=$(line_key "$1"); then
+    trim line "${1#$'\xef\xbb\xbf'}"
+    if [[ -z $line || $line == \#* ]]; then
+      return 0
+    fi
+    return 1
+  fi
+  [[ $settings_keys == *" $key "* ]] || return 1
+  [[ $secret_keys != *" $key "* || -z $(line_value "$1") ]]
+}
 
-# Every line that sets a password becomes a comment of the same length, written
+# ── Blanking and reporting ───────────────────────────────────────────────────
+
+# Every line keeps_line refuses becomes a comment of the same length, written
 # over the old bytes in place: renaming a new file over it would free the old
 # clusters with the passwords still in them. The status file says where they
-# went, and a rerun reads the blanked lines as comments.
+# went, and a rerun reads the blanked lines as comments. These run from the
+# exit trap, where errexit is off, so every step checks itself.
 blank_passwords() {
   local -a lines
-  local i key body cr ending="" content="" blanked=0
+  local i body cr size content="" blanked=0
 
-  mapfile -t lines <"$settings"
-  [[ -n $(tail -c 1 -- "$settings") ]] || ending=$'\n'
+  mapfile -t lines <"$settings" || return 1
   for i in "${!lines[@]}"; do
-    key=$(line_key "${lines[i]}") || continue
-    [[ " ${secrets[*]} " == *" $key "* ]] || continue
+    ! keeps_line "${lines[i]}" || continue
     cr=""
-    [[ ${lines[i]} == *$'\r' ]] && cr=$'\r'
+    if [[ ${lines[i]} == *$'\r' ]]; then
+      cr=$'\r'
+    fi
     body=${lines[i]%$'\r'}
-    printf -v "lines[$i]" '#%*s%s' "$(( ${#body} - 1 ))" "" "$cr"
+    printf -v "lines[$i]" '#%*s%s' "$(( ${#body} - 1 ))" "" "$cr" || return 1
     blanked=1
   done
   (( blanked )) || return 0
+
   for i in "${!lines[@]}"; do
-    content+=${lines[i]}
-    (( i == ${#lines[@]} - 1 )) || content+=$'\n'
+    content+=${lines[i]}$'\n'
   done
-  printf '%s%s' "$content" "$ending" 1<>"$settings"
+  if [[ -n $(tail -c 1 -- "$settings") ]]; then
+    content=${content%$'\n'}
+  fi
+  # Shorter, the rewrite would leave the old bytes past its end.
+  size=$(stat -c %s -- "$settings") || return 1
+  (( ${#content} == size )) || return 1
+  printf '%s' "$content" 1<>"$settings" || return 1
   sync
-  applied+=("the passwords in pimarchy.txt blanked")
+  applied+=("the passwords in pimarchy.txt blanked, with every line it could not use")
 }
 
 write_report() {
@@ -197,16 +209,65 @@ write_report() {
       printf -- '- %s\n' "${skipped[@]}"
     fi
     if [[ -n $account ]]; then
-      printf '\nOnce it has set up the account, reach it with:  ssh %s@%s.local\n' "$account" "${hostname:-$OMARCHY_HOSTNAME_DEFAULT}"
+      printf '\nOnce it has set up the account, reach it with:  ssh %s@%s.local\n' "$account" "${account_host:-$OMARCHY_HOSTNAME_DEFAULT}"
     fi
-  } >"$report.new"
-  mv -f "$report.new" "$report"
+  } >"$report.new" || return 1
+  mv -f "$report.new" "$report" || return 1
   sync
 }
 
+# ── Reading pimarchy.txt ─────────────────────────────────────────────────────
+
+# Only plain text can be read and blanked line by line. Bash drops NUL bytes,
+# so a file saved as UTF-16 would parse while blanking missed every line, and a
+# lone CR ends a line for its editor but not here. Such a file is used for
+# nothing, so its passwords stay where its owner put them, as before the boot.
+size=$(stat -c %s -- "$settings")
+not_text=""
+if (( size > 65536 )); then
+  not_text="it is over 64 KiB"
+elif (( $(tr -d '\0' <"$settings" | wc -c) != size )); then
+  not_text="it holds NUL bytes, as a file saved as UTF-16 does"
+elif grep -q $'\r.' "$settings"; then
+  not_text="its lines end in a CR alone"
+fi
+if [[ -n $not_text ]]; then
+  skipped+=("pimarchy.txt: unread, since $not_text. Save it as plain text (UTF-8) and boot again")
+  write_report
+  exit 0
+fi
+
+while IFS= read -r line || [[ -n $line ]]; do
+  if ! key=$(line_key "$line"); then
+    trim line "${line#$'\xef\xbb\xbf'}"
+    [[ -z $line || $line == \#* ]] || skipped+=("a line with no \"=\", which sets nothing")
+    continue
+  fi
+  value=$(line_value "$line")
+  if [[ $key == "SSH_KEY" ]]; then
+    [[ -z $value ]] || ssh_keys+=("$value")
+  elif [[ $settings_keys == *" $key "* ]]; then
+    setting[$key]=$value
+  else
+    skipped+=("$key: no such setting")
+  fi
+done <"$settings"
+
+has() { [[ -v setting[$1] ]]; }
+get() { printf '%s' "${setting[$1]:-}"; }
+
+# As the image ships it, every setting empty, apart from the two that only
+# change how others apply.
+in_use=$(( ${#ssh_keys[@]} + ${#skipped[@]} ))
+for key in "${!setting[@]}"; do
+  if [[ $key != "WIFI_HIDDEN" && $key != "SSH_PASSWORD_LOGIN" && -n ${setting[$key]} ]]; then
+    in_use=1
+  fi
+done
+(( in_use )) || exit 0
+
 # However the run ends, the passwords go and the owner learns what happened:
 # the status file is all a Pi with no screen can tell them.
-account="" hostname=""
 finish() {
   local status=$?
 
@@ -214,14 +275,14 @@ finish() {
   if (( status != 0 )); then
     skipped+=("the rest: setup stopped at an error, which journalctl -u omarchy-rpi-headless shows")
   fi
-  blank_passwords || status=1
+  if ! blank_passwords; then
+    skipped+=("blanking the passwords in pimarchy.txt failed: delete them by hand")
+    status=1
+  fi
   write_report || status=1
   exit "$status"
 }
 trap finish EXIT
-
-has() { [[ -v setting[$1] ]]; }
-get() { printf '%s' "${setting[$1]:-}"; }
 
 yes_no() {
   case ${1,,} in
@@ -231,8 +292,20 @@ yes_no() {
   esac
 }
 
+# A name timedated lists, as owner setup checks it: a zone or a link in the
+# tz database's tzdata.zi, with its file under zoneinfo.
+timezone_known() {
+  [[ $1 =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ && -f $zoneinfo/$1 && -f $zoneinfo/tzdata.zi ]] || return 1
+  awk -v tz="$1" '
+    ($1 == "Z" || $1 == "Zone") && $2 == tz { found = 1 }
+    ($1 == "L" || $1 == "Link") && $3 == tz { found = 1 }
+    END { exit !found }
+  ' "$zoneinfo/tzdata.zi"
+}
+
 # ── The machine ──────────────────────────────────────────────────────────────
 
+hostname=""
 if [[ -n $(get HOSTNAME) ]]; then
   if [[ $(get HOSTNAME) =~ $OMARCHY_HOSTNAME_PATTERN ]]; then
     hostname=$(get HOSTNAME)
@@ -247,7 +320,7 @@ fi
 
 timezone=""
 if [[ -n $(get TIMEZONE) ]]; then
-  if [[ $(get TIMEZONE) =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ && -f $zoneinfo/$(get TIMEZONE) ]]; then
+  if timezone_known "$(get TIMEZONE)"; then
     timezone=$(get TIMEZONE)
     ln -sfn "../usr/share/zoneinfo/$timezone" "$fixture/etc/localtime"
     applied+=("timezone $timezone")
@@ -284,7 +357,7 @@ if [[ -n $(get WIFI_COUNTRY) ]]; then
 fi
 
 # A GLib key file string: backslashes doubled, and spaces as \s so none is
-# trimmed. A password is printable ASCII, so nothing else needs escaping.
+# trimmed. psk_valid keeps out the control characters that would need more.
 keyfile_string() {
   local text=${1//\\/\\\\}
 
@@ -301,6 +374,15 @@ ssid_bytes() {
   printf '%s' "$out"
 }
 
+# A WPA passphrase: 8 to 63 bytes with no control characters, valid UTF-8 as
+# NetworkManager reads its key files, or the key itself as 64 hex digits.
+psk_valid() {
+  if [[ $1 =~ ^[[:xdigit:]]{64}$ ]]; then
+    return 0
+  fi
+  [[ $1 =~ ^[^[:cntrl:]]{8,63}$ ]] && printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+}
+
 ssid=$(get WIFI_SSID)
 if [[ -n $ssid ]]; then
   psk=$(get WIFI_PASSWORD)
@@ -311,16 +393,17 @@ if [[ -n $ssid ]]; then
     wifi_ok=0
   fi
   if ! has WIFI_PASSWORD; then
-    # Blanked by an earlier run, whose profile stays. Otherwise the owner left
-    # the line out.
-    if [[ -f $profile ]]; then
+    # Blanked by an earlier run, whose profile stays if it is for this network.
+    if [[ ! -f $profile ]]; then
+      skipped+=("WIFI_SSID: no WIFI_PASSWORD line (keep it, empty, for an open network)")
+    elif grep -qxF "ssid=$(ssid_bytes "$ssid")" "$profile"; then
       applied+=("Wi-Fi network \"$ssid\", set up on an earlier boot")
     else
-      skipped+=("WIFI_SSID: no WIFI_PASSWORD line (keep it, empty, for an open network)")
+      skipped+=("WIFI_SSID: an earlier boot set up another network; add a WIFI_PASSWORD line for this one")
     fi
     wifi_ok=0
-  elif [[ -n $psk && ! $psk =~ ^[[:print:]]{8,63}$ && ! $psk =~ ^[[:xdigit:]]{64}$ ]]; then
-    skipped+=("WIFI_PASSWORD: 8 to 63 characters, or 64 hex digits")
+  elif [[ -n $psk ]] && ! psk_valid "$psk"; then
+    skipped+=("WIFI_PASSWORD: 8 to 63 characters (a letter beyond plain English may count as two or three), or 64 hex digits")
     wifi_ok=0
   fi
   if yes_no "$(get WIFI_HIDDEN)"; then
@@ -345,53 +428,74 @@ if [[ -n $ssid ]]; then
     } >"$profile.new"
     chmod 600 "$profile.new"
     mv -f "$profile.new" "$profile"
-    applied+=("Wi-Fi network \"$ssid\"${psk:+ with its password}")
+    if [[ -n $psk ]]; then
+      applied+=("Wi-Fi network \"$ssid\" with its password")
+    else
+      applied+=("Wi-Fi network \"$ssid\", open, since WIFI_PASSWORD is empty")
+    fi
   fi
-elif has WIFI_PASSWORD && [[ -n $(get WIFI_PASSWORD) ]]; then
+elif [[ -n $(get WIFI_PASSWORD) ]]; then
   skipped+=("WIFI_PASSWORD: no WIFI_SSID names the network")
 fi
 
 # ── The account ──────────────────────────────────────────────────────────────
 
+full_name=$(get FULL_NAME)
+if [[ $full_name == *:* ]]; then
+  skipped+=("FULL_NAME: no colons")
+  full_name=""
+fi
+
+# The form's answers for owner setup: account $1 with password line $2.
+write_answers() {
+  {
+    printf 'USERNAME=%s\n%s\n' "$1" "$2"
+    printf 'FULL_NAME=%s\nEMAIL=%s\n' "$full_name" "$(get EMAIL)"
+    printf 'HOSTNAME=%s\nTIMEZONE=%s\nKEYBOARD=%s\n' "$hostname" "$timezone" "$keyboard"
+  } >"$answers.new"
+  chmod 600 "$answers.new"
+  mv -f "$answers.new" "$answers"
+}
+
 username=$(get USERNAME)
-answers=$provisioning/answers
-if [[ -n $(get PASSWORD) || -n $(get PASSWORD_HASH) ]]; then
-  password_line=""
+password_line=""
+if [[ -n $(get PASSWORD_HASH) ]]; then
+  if [[ $(get PASSWORD_HASH) =~ ^\$[0-9a-z]+\$[^:[:space:]]+$ ]]; then
+    password_line="PASSWORD_HASH=$(get PASSWORD_HASH)"
+  else
+    skipped+=("PASSWORD_HASH: a crypt(3) hash, such as openssl passwd -6 makes")
+  fi
+elif [[ -n $(get PASSWORD) ]]; then
+  password_line="PASSWORD=$(get PASSWORD)"
+fi
+
+if [[ -n $password_line ]]; then
   if [[ -z $username ]]; then
     skipped+=("PASSWORD: no USERNAME for it")
   elif [[ ! $username =~ $OMARCHY_USERNAME_PATTERN || $username =~ $OMARCHY_RESERVED_USERNAMES ]]; then
     skipped+=("USERNAME: lowercase letters, digits, - and _, starting with a letter, and not a system account's name")
-  elif [[ -n $(get PASSWORD_HASH) ]]; then
-    if [[ $(get PASSWORD_HASH) =~ ^\$[0-9a-z]+\$[^:[:space:]]+$ ]]; then
-      password_line="PASSWORD_HASH=$(get PASSWORD_HASH)"
-    else
-      skipped+=("PASSWORD_HASH: a crypt(3) hash, such as openssl passwd -6 makes")
-    fi
+  elif awk -F: -v user="$username" '$1 == user { found = 1 } END { exit !found }' "$passwd"; then
+    skipped+=("USERNAME: the image already has an account named $username")
   else
-    password_line="PASSWORD=$(get PASSWORD)"
-  fi
-
-  if [[ -n $password_line ]]; then
-    full_name=$(get FULL_NAME)
-    if [[ $full_name == *:* ]]; then
-      skipped+=("FULL_NAME: no colons")
-      full_name=""
-    fi
-    {
-      printf 'USERNAME=%s\n%s\n' "$username" "$password_line"
-      printf 'FULL_NAME=%s\nEMAIL=%s\n' "$full_name" "$(get EMAIL)"
-      printf 'HOSTNAME=%s\nTIMEZONE=%s\nKEYBOARD=%s\n' "$hostname" "$timezone" "$keyboard"
-    } >"$answers.new"
-    chmod 600 "$answers.new"
-    mv -f "$answers.new" "$answers"
-    account=$username
+    write_answers "$username" "$password_line"
     applied+=("account $username, created when first-boot setup runs")
   fi
 elif [[ -f $answers ]]; then
-  account=$username
-  applied+=("account${username:+ $username}, set up on an earlier boot")
+  # Staged by an earlier run whose passwords are blanked now: it keeps its
+  # account and password, and takes this file's other settings.
+  staged=$(sed -n 's/^USERNAME=//p' "$answers")
+  if [[ -z $username || $username == "$staged" ]]; then
+    write_answers "$staged" "$(grep -m 1 -E '^(PASSWORD|PASSWORD_HASH)=' "$answers")"
+    applied+=("account $staged, set up on an earlier boot")
+  else
+    skipped+=("USERNAME: an earlier boot set up the account $staged; give $username a PASSWORD to set it up instead")
+  fi
 elif [[ -n $username ]]; then
   skipped+=("USERNAME: no PASSWORD or PASSWORD_HASH for it")
+fi
+if [[ -f $answers ]]; then
+  account=$(sed -n 's/^USERNAME=//p' "$answers")
+  account_host=$(sed -n 's/^HOSTNAME=//p' "$answers")
 fi
 
 # ── SSH ──────────────────────────────────────────────────────────────────────
@@ -443,4 +547,3 @@ fi
 if [[ -n $keyboard && -z $account ]]; then
   skipped+=("KEYBOARD: it comes with the account; without one the screen asks for it")
 fi
-

@@ -1,8 +1,9 @@
 # Pimarchy headless setup
 #
 # Fill this in on the computer that flashed the card to set the Pi up without
-# a screen or keyboard: delete the "#" in front of a setting and put your value
-# after its "=". Leave the file as it is to set the Pi up at its screen.
+# a screen or keyboard: put your value after the "=" of each setting you want,
+# and leave the others empty. Leave the whole file as it is to set the Pi up at
+# its screen. Save it as plain text.
 #
 # On its first boot the Pi reads this file, joins your Wi-Fi network, turns SSH
 # on and creates your account, then blanks the passwords below and writes what
@@ -11,41 +12,43 @@
 #
 #   ssh USERNAME@HOSTNAME.local
 #
-# A value is used as written. Put it in "double quotes" to keep spaces at its
-# start or end.
+# The Pi reads this file only until it has set up its account. A value is used
+# as written; put it in "double quotes" to keep spaces at its start or end.
 
 # --- Wi-Fi --------------------------------------------------------------------
-# Your network's name and password. For an open network keep the password line,
-# with nothing after the "=".
-#WIFI_SSID=
-#WIFI_PASSWORD=
+# Your network's name and password. A name with no password joins an open
+# network. Leave both empty on Ethernet.
+WIFI_SSID=
+WIFI_PASSWORD=
 # The two-letter code of the country the Pi is in, such as US, GB or DE: the
 # radio uses only the channels allowed there.
-#WIFI_COUNTRY=
+WIFI_COUNTRY=
 # yes for a network that does not broadcast its name.
-#WIFI_HIDDEN=no
+WIFI_HIDDEN=no
 
 # --- Account ------------------------------------------------------------------
 # Your username (lowercase letters, digits, - and _) and password, which root
-# gets too. PASSWORD_HASH takes a hash of the password instead, so the card
-# never holds it; make one with:  openssl passwd -6
-#USERNAME=
-#PASSWORD=
-#PASSWORD_HASH=
+# gets too. To keep the password itself off the card, leave PASSWORD empty and
+# give PASSWORD_HASH its hash instead, which this makes:  openssl passwd -6
+USERNAME=
+PASSWORD=
+PASSWORD_HASH=
 # Your name and email, for git. Optional.
-#FULL_NAME=
-#EMAIL=
+FULL_NAME=
+EMAIL=
 
 # --- Machine ------------------------------------------------------------------
-# The Pi's name on the network (omarchy unless set), its timezone (UTC unless
-# set) and its keyboard layout (us unless set), such as uk, de or fr.
-#HOSTNAME=
-#TIMEZONE=Europe/London
-#KEYBOARD=us
+# The Pi's name on the network (omarchy if empty), its timezone, such as
+# Europe/London (UTC if empty), and its keyboard layout, such as us, uk, de or
+# fr (us if empty).
+HOSTNAME=
+TIMEZONE=
+KEYBOARD=
 
 # --- SSH ----------------------------------------------------------------------
-# SSH is on once this file sets up the account or gives a key. Paste each public
-# key (the contents of ~/.ssh/id_ed25519.pub, say) on its own SSH_KEY line. With
-# a key, password logins are off unless SSH_PASSWORD_LOGIN says yes.
-#SSH_KEY=
-#SSH_PASSWORD_LOGIN=no
+# SSH is on once this file sets up the account or gives a key. Paste your public
+# key (the contents of ~/.ssh/id_ed25519.pub, say) after SSH_KEY=, and add an
+# SSH_KEY= line for each other key. With a key, password logins are off unless
+# SSH_PASSWORD_LOGIN is yes.
+SSH_KEY=
+SSH_PASSWORD_LOGIN=no
