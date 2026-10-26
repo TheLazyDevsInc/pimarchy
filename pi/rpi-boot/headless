@@ -19,7 +19,7 @@
 #   SSH keys for it;
 # - turns SSH on, with password logins off once there is a key;
 # - blanks the passwords in pimarchy.txt where they lie, with every line it
-#   could not use, and writes what it did to pimarchy-status.txt beside it.
+#   could not read, and writes what it did to pimarchy-status.txt beside it.
 #
 # The file is read as data, never sourced, and checked by the owner form's own
 # rules (install/provisioning/setup-form.sh), so owner setup takes whatever this
@@ -78,6 +78,7 @@ profile=$connections/pimarchy-wifi.nmconnection
 hardening=$fixture/etc/ssh/sshd_config.d/10-omarchy-hardening.conf
 zoneinfo=$fixture/usr/share/zoneinfo
 passwd=$fixture/etc/passwd
+group=$fixture/etc/group
 
 # First-boot setup is done, or the owner deleted the file.
 [[ -f $provisioning/pending ]] || exit 0
@@ -99,11 +100,16 @@ fi
 OMARCHY_FORM_DEFAULTS=$fixture/etc/omarchy/form-defaults
 source "$form"
 
-settings_keys=" WIFI_SSID WIFI_PASSWORD WIFI_COUNTRY WIFI_HIDDEN USERNAME PASSWORD PASSWORD_HASH FULL_NAME EMAIL HOSTNAME TIMEZONE KEYBOARD SSH_KEY SSH_PASSWORD_LOGIN "
-secret_keys=" WIFI_PASSWORD PASSWORD PASSWORD_HASH "
-
-declare -A setting=()
+declare -A known=() secret=() setting=()
+for key in WIFI_SSID WIFI_PASSWORD WIFI_COUNTRY WIFI_HIDDEN USERNAME PASSWORD PASSWORD_HASH FULL_NAME EMAIL HOSTNAME \
+  TIMEZONE KEYBOARD SSH_KEY SSH_PASSWORD_LOGIN; do
+  known[$key]=1
+done
+for key in WIFI_PASSWORD PASSWORD PASSWORD_HASH; do
+  secret[$key]=1
+done
 ssh_keys=()
+ssh_key_lines=()
 skipped=()
 applied=()
 # The account owner setup will create, and the hostname it will give the
@@ -131,8 +137,14 @@ line_key() {
   printf '%s' "${line^^}"
 }
 
-# The value a setting line gives, trimmed: quotes around it keep its own
-# leading and trailing spaces.
+# Whether $1, as line_key gives it, is a setting this knows. The pattern comes
+# first, so no key reaches the array lookup with characters it would read.
+known_key() {
+  [[ $1 =~ ^[A-Z][A-Z_]*$ && -v known[$1] ]]
+}
+
+# The value a setting line gives, trimmed: double or single quotes around it go,
+# and keep its own leading and trailing spaces.
 line_value() {
   local value=${1#*=}
 
@@ -144,7 +156,9 @@ line_value() {
 }
 
 # Whether blanking keeps line $1: a comment, a blank line, or a setting this
-# knows that holds no password. A line it can't read could hold anything. It
+# knows that holds no password. A line it can't read could hold anything, and
+# an empty password line goes too, so a rerun can't take the template's empty
+# WIFI_PASSWORD for an open network once the owner's own line is blanked. It
 # runs from the exit trap, where a bare return gives the status from before the
 # trap, so every return names its own.
 keeps_line() {
@@ -157,8 +171,10 @@ keeps_line() {
     fi
     return 1
   fi
-  [[ $settings_keys == *" $key "* ]] || return 1
-  [[ $secret_keys != *" $key "* || -z $(line_value "$1") ]]
+  if known_key "$key" && [[ ! -v secret[$key] ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # ── Blanking and reporting ───────────────────────────────────────────────────
@@ -196,22 +212,26 @@ blank_passwords() {
   (( ${#content} == size )) || return 1
   printf '%s' "$content" 1<>"$settings" || return 1
   sync
-  applied+=("the passwords in pimarchy.txt blanked, with every line it could not use")
+  applied+=("the passwords in pimarchy.txt blanked, with every line it could not read")
 }
 
+# The report is composed first and written in one checked step, so a failed
+# write never replaces the last one.
 write_report() {
-  {
-    printf '# What the Pi did with pimarchy.txt on its first boot, %s UTC.\n\n' "$(date -u '+%Y-%m-%d %H:%M')"
-    printf 'Applied:\n'
-    printf -- '- %s\n' "${applied[@]:-nothing}"
-    if (( ${#skipped[@]} )); then
-      printf '\nSkipped:\n'
-      printf -- '- %s\n' "${skipped[@]}"
-    fi
-    if [[ -n $account ]]; then
-      printf '\nOnce it has set up the account, reach it with:  ssh %s@%s.local\n' "$account" "${account_host:-$OMARCHY_HOSTNAME_DEFAULT}"
-    fi
-  } >"$report.new" || return 1
+  local text part
+
+  printf -v text '# What the Pi did with pimarchy.txt on its first boot, %s UTC.\n\nApplied:\n' "$(date -u '+%Y-%m-%d %H:%M')"
+  printf -v part -- '- %s\n' "${applied[@]:-nothing}"
+  text+=$part
+  if (( ${#skipped[@]} )); then
+    printf -v part -- '- %s\n' "${skipped[@]}"
+    text+=$'\nSkipped:\n'$part
+  fi
+  if [[ -n $account ]]; then
+    printf -v part '\nOnce it has set up the account, reach it with:  ssh %s@%s.local\n' "$account" "${account_host:-$OMARCHY_HOSTNAME_DEFAULT}"
+    text+=$part
+  fi
+  printf '%s' "$text" >"$report.new" || return 1
   mv -f "$report.new" "$report" || return 1
   sync
 }
@@ -237,19 +257,39 @@ if [[ -n $not_text ]]; then
   exit 0
 fi
 
+# A line it can't read is reported by its number, and by its key only when that
+# looks like one: the text before a stray "=" could be a password.
+number=0
 while IFS= read -r line || [[ -n $line ]]; do
+  number=$(( number + 1 ))
   if ! key=$(line_key "$line"); then
     trim line "${line#$'\xef\xbb\xbf'}"
-    [[ -z $line || $line == \#* ]] || skipped+=("a line with no \"=\", which sets nothing")
+    [[ -z $line || $line == \#* ]] || skipped+=("line $number: no \"=\", so it sets nothing")
+    continue
+  fi
+  if ! known_key "$key"; then
+    if [[ $key =~ ^[A-Z][A-Z0-9_]{0,31}$ ]]; then
+      skipped+=("line $number: there is no setting $key")
+    else
+      skipped+=("line $number: no setting this knows")
+    fi
     continue
   fi
   value=$(line_value "$line")
   if [[ $key == "SSH_KEY" ]]; then
-    [[ -z $value ]] || ssh_keys+=("$value")
-  elif [[ $settings_keys == *" $key "* ]]; then
+    if [[ -n $value ]]; then
+      ssh_keys+=("$value")
+      ssh_key_lines+=("$number")
+    fi
+  elif [[ -n $value ]]; then
+    if [[ -n ${setting[$key]:-} ]]; then
+      skipped+=("$key: given more than once, so line $number's is used")
+    fi
     setting[$key]=$value
-  else
-    skipped+=("$key: no such setting")
+  elif [[ ! -v setting[$key] ]]; then
+    # An empty line only says the setting is there: the template's empty lines
+    # don't undo a value given above them.
+    setting[$key]=""
   fi
 done <"$settings"
 
@@ -283,6 +323,10 @@ finish() {
   exit "$status"
 }
 trap finish EXIT
+# Stopped by a signal, the exit trap would read the status from before it.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 yes_no() {
   case ${1,,} in
@@ -457,6 +501,22 @@ write_answers() {
   mv -f "$answers.new" "$answers"
 }
 
+# Whether no account or group has name $1: useradd makes a group of the
+# account's name, and refuses one that exists. A file it can't read answers no.
+name_free() {
+  local status=0
+
+  awk -F: -v name="$1" '$1 == name { found = 1 } END { exit !found }' "$passwd" "$group" 2>/dev/null || status=$?
+  (( status == 1 ))
+}
+
+# The account an earlier attempt of owner setup created before it failed, which
+# owner setup resumes and no other.
+pinned=""
+if [[ -f $provisioning/setup-user ]]; then
+  pinned=$(<"$provisioning/setup-user")
+fi
+
 username=$(get USERNAME)
 password_line=""
 if [[ -n $(get PASSWORD_HASH) ]]; then
@@ -474,8 +534,10 @@ if [[ -n $password_line ]]; then
     skipped+=("PASSWORD: no USERNAME for it")
   elif [[ ! $username =~ $OMARCHY_USERNAME_PATTERN || $username =~ $OMARCHY_RESERVED_USERNAMES ]]; then
     skipped+=("USERNAME: lowercase letters, digits, - and _, starting with a letter, and not a system account's name")
-  elif awk -F: -v user="$username" '$1 == user { found = 1 } END { exit !found }' "$passwd"; then
-    skipped+=("USERNAME: the image already has an account named $username")
+  elif [[ -n $pinned && $username != "$pinned" ]]; then
+    skipped+=("USERNAME: an earlier boot already created the account $pinned, which setup finishes")
+  elif [[ -z $pinned ]] && ! name_free "$username"; then
+    skipped+=("USERNAME: the image already has an account or group named $username")
   else
     write_answers "$username" "$password_line"
     applied+=("account $username, created when first-boot setup runs")
@@ -500,21 +562,29 @@ fi
 
 # ── SSH ──────────────────────────────────────────────────────────────────────
 
+# A key as a .pub file holds it: its type first. ssh-keygen also reads a line
+# with options or a known_hosts entry, which sshd would ignore in
+# authorized_keys while password logins went off for it.
 keys=()
-for key in "${ssh_keys[@]}"; do
-  if ssh-keygen -lf /dev/stdin <<<"$key" >/dev/null 2>&1; then
+for i in "${!ssh_keys[@]}"; do
+  key=${ssh_keys[i]}
+  if [[ ${key%%[[:space:]]*} =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$ ]] &&
+    ssh-keygen -lf /dev/stdin <<<"$key" >/dev/null 2>&1; then
     keys+=("$key")
   else
-    skipped+=("SSH_KEY: not a public key: ${key:0:24}...")
+    skipped+=("SSH_KEY on line ${ssh_key_lines[i]}: not a public key, as a .pub file holds it")
   fi
 done
 
+# What this run's file authorizes replaces what an earlier run staged.
 password_logins=1
 if (( ${#keys[@]} )); then
   printf '%s\n' "${keys[@]}" >"$provisioning/authorized_keys.new"
   chmod 600 "$provisioning/authorized_keys.new"
   mv -f "$provisioning/authorized_keys.new" "$provisioning/authorized_keys"
   password_logins=0
+else
+  rm -f "$provisioning/authorized_keys"
 fi
 if yes_no "$(get SSH_PASSWORD_LOGIN)"; then
   password_logins=1

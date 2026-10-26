@@ -1532,7 +1532,7 @@ arm_first_boot() {
 
   # A Pi with no screen is set up from pimarchy.txt instead, which its owner
   # fills in on the boot partition after flashing (pi/rpi-boot/headless). It
-  # ships with every setting commented out, and the unit does nothing with it so.
+  # ships with every setting empty, and the unit does nothing with it so.
   install -m 0644 -o 0 -g 0 "$root/usr/share/omarchy-rpi-boot/pimarchy.txt" "$root/boot/pimarchy.txt"
   guest systemctl enable omarchy-rpi-headless.service
 }
@@ -1650,7 +1650,7 @@ root_problems() (
     problem "omarchy-rpi-headless.service is not enabled"
   # Anything but the template could hand every flashed card someone's settings.
   cmp -s "$root/usr/share/omarchy-rpi-boot/pimarchy.txt" "$root/boot/pimarchy.txt" ||
-    problem "/boot/pimarchy.txt is not omarchy-rpi-boot's template, with every setting commented out"
+    problem "/boot/pimarchy.txt is not omarchy-rpi-boot's template, with every setting empty"
 
   # Accounts.
   if grep -q '^alarm:' "$root/etc/passwd" "$root/etc/shadow" "$root/etc/group"; then

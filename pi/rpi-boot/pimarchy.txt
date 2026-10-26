@@ -13,7 +13,8 @@
 #   ssh USERNAME@HOSTNAME.local
 #
 # The Pi reads this file only until it has set up its account. A value is used
-# as written; put it in "double quotes" to keep spaces at its start or end.
+# as written, apart from quotes around it, which go: put a value in "quotes" to
+# keep spaces at its start or end.
 
 # --- Wi-Fi --------------------------------------------------------------------
 # Your network's name and password. A name with no password joins an open

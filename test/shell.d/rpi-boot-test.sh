@@ -237,7 +237,7 @@ if unshare --user --map-root-user true 2>/dev/null; then
   mkdir -p "$tmp/as-root"
   printf '#!/bin/bash\nexit 0\n' >"$tmp/as-root/yes"
   chmod +x "$tmp/as-root/yes"
-  for script in setup-boot update-verify grow-root headless; do
+  for script in setup-boot update-verify grow-root; do
     sed "s|/usr/bin/omarchy-hw-aarch64-rpi|$tmp/as-root/yes|" "$scripts/$script" >"$tmp/as-root/$script"
     chmod +x "$tmp/as-root/$script"
     grep -qF "$tmp/as-root/yes" "$tmp/as-root/$script" || fail "$script checks the platform with /usr/bin/omarchy-hw-aarch64-rpi as root"
@@ -698,6 +698,7 @@ reset_headless() {
   touch "$root/usr/share/zoneinfo/Europe/London" "$root/usr/share/zoneinfo/posixrules"
   printf '%s\n' '# tzdata.zi' 'Z Europe/London -0:1:15 - LMT 1847 D' 'L Europe/London GB' >"$root/usr/share/zoneinfo/tzdata.zi"
   printf '%s\n' 'root:x:0:0::/root:/bin/bash' 'sys:x:3:3::/:/usr/bin/nologin' >"$root/etc/passwd"
+  printf '%s\n' 'root:x:0:' 'sys:x:3:' 'wheel:x:998:' >"$root/etc/group"
   echo omarchy | tee "$root/etc/hostname" >"$root/proc/sys/kernel/hostname"
   cp "$scripts/pimarchy.txt" "$settings"
   chmod -R go-w "$root"
@@ -709,6 +710,35 @@ before=$(fingerprint)
 output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with the image's pimarchy.txt" "$output"
 [[ $(fingerprint) == "$before" && ! -s $calls ]] || fail "the image's pimarchy.txt changes nothing" "$(cat "$calls")"
 pass "pimarchy.txt as the image ships it changes nothing"
+
+# Root sources the form's rules, so they must be root's alone.
+reset_headless
+printf 'HOSTNAME=pi400\n' >"$settings"
+chmod g+w "$root/usr/share/omarchy/install/provisioning/setup-form.sh"
+before=$(fingerprint)
+status=0
+output=$(on aarch64-rpi headless 2>&1) || status=$?
+(( status == 1 )) && [[ $output == *"refusing $root/usr/share/omarchy/install/provisioning/setup-form.sh"* && $(fingerprint) == "$before" ]] ||
+  fail "headless refuses form rules someone else could write" "status $status: $output"
+pass "headless refuses form rules someone else could write, and changes nothing"
+
+# Root reads neither the fixture root nor the stubs: on a fixture it would act
+# on, as root it finds no first boot pending on this machine and stops.
+if unshare --user --map-root-user true 2>/dev/null; then
+  reset_headless
+  printf 'HOSTNAME=pi400\n' >"$settings"
+  before=$(fingerprint)
+  mkdir -p "$tmp/as-root"
+  printf '#!/bin/bash\nexit 0\n' >"$tmp/as-root/yes"
+  chmod +x "$tmp/as-root/yes"
+  sed "s|/usr/bin/omarchy-hw-aarch64-rpi|$tmp/as-root/yes|" "$scripts/headless" >"$tmp/as-root/headless"
+  chmod +x "$tmp/as-root/headless"
+  output=$(OMARCHY_RPI_BOOT_ROOT="$root" PATH="$stubs:$PATH" unshare --user --map-root-user "$tmp/as-root/headless" 2>&1) || true
+  [[ $(fingerprint) == "$before" && ! -s $calls ]] || fail "root ignores headless's fixture root and the stubs on its PATH" "$output"
+  pass "root ignores headless's fixture root and the stubs on its PATH"
+else
+  skip "no unprivileged user namespace; skipping the check that root ignores headless's fixture root"
+fi
 
 # Filled in on Windows: a byte order mark, CRLF line ends, a lower-case key,
 # spaces around an "=", and quotes keeping a password's own spaces.
@@ -774,6 +804,15 @@ cmp -s "$profile" "$tmp/profile" && cmp -s "$provisioning/answers" "$tmp/answers
   fail "a rerun reports what an earlier boot set up" "$(cat "$status_file")"
 pass "a rerun after the passwords are blanked keeps the Wi-Fi profile and the account"
 
+# The account's other answers follow the file, and keys taken out of it go.
+sed -i -e 's/^HOSTNAME=pi400/HOSTNAME=pi4b/' -e '/^SSH_KEY=/d' "$settings"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs again with another hostname" "$output"
+[[ $(<"$provisioning/answers") == $'USERNAME=pi4\nPASSWORD=hunter2!\nFULL_NAME=Ada Lovelace\nEMAIL=ada@example.com\nHOSTNAME=pi4b\nTIMEZONE=Europe/London\nKEYBOARD=uk' &&
+  ! -e $provisioning/authorized_keys && ! -e $root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf ]] ||
+  fail "a rerun keeps the account's password, takes the file's hostname, and drops the keys it no longer lists" "$(cat "$provisioning/answers")"
+cp "$provisioning/answers" "$tmp/answers"
+pass "a rerun keeps the account's password, follows the file's other settings, and drops keys taken out of it"
+
 # A rerun that names another network or account, without its password, keeps
 # what the first boot set up and says so.
 sed -i -e 's/^WIFI_SSID = .*/WIFI_SSID=Other\r/' -e 's/^USERNAME=.*/USERNAME=ada\r/' "$settings"
@@ -781,24 +820,79 @@ output=$(on aarch64-rpi headless 2>&1) || fail "headless runs again with other n
 cmp -s "$profile" "$tmp/profile" && cmp -s "$provisioning/answers" "$tmp/answers" ||
   fail "a rerun naming another network or account keeps the first boot's"
 [[ $(<"$status_file") == *"- WIFI_SSID: an earlier boot set up another network"* &&
-  $(<"$status_file") == *"- USERNAME: an earlier boot set up the account pi4"* && $(<"$status_file") == *"ssh pi4@pi400.local"* ]] ||
+  $(<"$status_file") == *"- USERNAME: an earlier boot set up the account pi4"* && $(<"$status_file") == *"ssh pi4@pi4b.local"* ]] ||
   fail "a rerun naming another network or account says the first boot's stay" "$(cat "$status_file")"
 pass "a rerun naming another network or account without its password keeps, and reports, what the first boot set up"
+
+# After owner setup created the account and failed, a rerun gives that account
+# a new password, and stages no other.
+sed -i 's/^USERNAME=.*/USERNAME=pi4\r/' "$settings"
+printf 'PASSWORD=n3w-pass\r\n' >>"$settings"
+echo 'pi4:x:1000:1000::/home/pi4:/bin/bash' >>"$root/etc/passwd"
+echo pi4 >"$provisioning/setup-user"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs after owner setup pinned the account" "$output"
+grep -qx 'PASSWORD=n3w-pass' "$provisioning/answers" && grep -qx 'USERNAME=pi4' "$provisioning/answers" ||
+  fail "a rerun gives the pinned account its new password" "$(cat "$provisioning/answers")"
+sed -i 's/^USERNAME=.*/USERNAME=bob\r/' "$settings"
+printf 'PASSWORD=b0b-pass\r\n' >>"$settings"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with another account after the pin" "$output"
+grep -qx 'USERNAME=pi4' "$provisioning/answers" && [[ $(<"$status_file") == *"- USERNAME: an earlier boot already created the account pi4"* ]] ||
+  fail "a rerun stages no account but the pinned one" "$(cat "$status_file")"
+pass "after owner setup pinned its account, a rerun can change its password but stage no other"
+
+# The README's block pasted above the template's empty lines: an empty repeat
+# doesn't undo a value, and every password line goes, empty ones too, so the
+# next boot keeps the network's password rather than taking it for open.
+reset_headless
+{
+  printf '%s\n' 'WIFI_SSID=Home network' 'WIFI_PASSWORD=correct horse battery' 'WIFI_COUNTRY=GB' 'USERNAME=ada' \
+    'PASSWORD=a long password' 'HOSTNAME=pi400'
+  cat "$scripts/pimarchy.txt"
+} >"$settings"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless reads a block pasted above the template" "$output"
+grep -qx 'psk=correct\\shorse\\sbattery' "$profile" && grep -qx 'USERNAME=ada' "$provisioning/answers" &&
+  ! grep -q '^WIFI_PASSWORD=\|^PASSWORD=\|^PASSWORD_HASH=' "$settings" ||
+  fail "a pasted block's values win over the template's empty lines, and every password line goes" "$(cat "$profile")"
+cp "$profile" "$tmp/profile"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs again after a pasted block" "$output"
+cmp -s "$profile" "$tmp/profile" || fail "the next boot keeps the network's password" "$(cat "$profile")"
+pass "a block pasted above the template's empty lines is used, and the next boot keeps the network's password"
+
+# An open network, an account by its password's hash, password logins kept on
+# with a key, and a last line with no line end, which keeps its length.
+reset_headless
+printf '%s\n' 'WIFI_SSID=Cafe' 'WIFI_PASSWORD=' 'USERNAME=ada' 'PASSWORD_HASH=$6$salt$hash' 'SSH_PASSWORD_LOGIN=yes' \
+  'SSH_KEY=ssh-ed25519 AAAAC3Nz ada@laptop' >"$settings"
+printf 'PASSWORD=unused-pass' >>"$settings"
+size=$(stat -c %s "$settings")
+output=$(on aarch64-rpi headless 2>&1) || fail "headless sets up an open network and a hashed password" "$output"
+! grep -q 'wifi-security' "$profile" && grep -qx 'PASSWORD_HASH=$6$salt$hash' "$provisioning/answers" &&
+  ! grep -q '^PASSWORD=' "$provisioning/answers" && [[ ! -e $root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf ]] ||
+  fail "an open network has no password, the hash goes to owner setup, and password logins stay on" "$(cat "$provisioning/answers")"
+[[ $(stat -c %s "$settings") == "$size" && -n $(tail -c 1 "$settings") ]] && ! grep -q 'unused-pass\|salt' "$settings" ||
+  fail "a password on a last line with no line end is blanked in place" "$(cat -A "$settings")"
+pass "an open network, a hashed password, password logins kept on, and a last line with no line end"
 
 # What the owner form wouldn't take is skipped and reported, and changes
 # nothing: an account the image has, a zoneinfo file timedated doesn't list.
 # Lines it can't read could hold a password, so they are blanked too.
 reset_headless
-printf '%s\n' 'WIFI_SSID=home' 'WIFI_PASSWORD=short' 'WIFI_COUNTRY=XX' 'USERNAME=sys' 'PASSWORD=hunter2!' 'HOSTNAME=-bad-' \
-  'TIMEZONE=posixrules' 'KEYBOARD=klingon' 'SSH_KEY=not a key' 'WIFI_PASWORD=typo1234' 'secret on its own' >"$settings"
+printf '%s\n' 'WIFI_SSID=home' 'WIFI_PASSWORD=short' 'WIFI_COUNTRY=XX' 'USERNAME=wheel' 'PASSWORD=hunter2!' 'HOSTNAME=-bad-' \
+  'TIMEZONE=posixrules' 'KEYBOARD=klingon' 'SSH_KEY=not a key' 'WIFI_PASWORD=typo1234' 'secret on its own' \
+  'PASSWORD: Zm9vYmFy=' 'USERNAME PASSWORD=joined1234' >"$settings"
 output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with settings it can't use" "$output"
 [[ ! -e $profile && ! -e $provisioning/answers && ! -e $provisioning/authorized_keys && ! -e $root/etc/localtime &&
   ! -e $root/etc/ssh && $(<"$root/etc/hostname") == "omarchy" ]] || fail "settings it can't use change nothing"
 ! grep -q 'systemctl\|ufw\|set-wireless-regdom' "$calls" || fail "nothing turns on for settings it can't use" "$(cat "$calls")"
-for key in WIFI_PASSWORD WIFI_COUNTRY USERNAME HOSTNAME TIMEZONE KEYBOARD SSH_KEY WIFI_PASWORD "a line with no"; do
-  [[ $(<"$status_file") == *"- $key"* ]] || fail "the status file names $key as skipped" "$(cat "$status_file")"
+for item in "WIFI_PASSWORD: 8 to 63" "WIFI_COUNTRY: no country" "USERNAME: the image already has an account or group named wheel" \
+  "HOSTNAME: letters" "TIMEZONE: no timezone is named posixrules" "KEYBOARD: no layout is named klingon" \
+  "SSH_KEY on line 9: not a public key" "line 10: there is no setting WIFI_PASWORD" 'line 11: no "="' \
+  "line 12: no setting this knows" "line 13: no setting this knows"; do
+  [[ $(<"$status_file") == *"- $item"* ]] || fail "the status file reports: $item" "$(cat "$status_file")"
 done
-! grep -q 'hunter2\|short\|typo1234\|secret' "$settings" && grep -qx 'USERNAME=sys' "$settings" ||
+[[ $(<"$status_file") != *ZM9V* && $(<"$status_file") != *"not a key"* ]] ||
+  fail "the status file repeats nothing from a line it can't read" "$(cat "$status_file")"
+! grep -q 'hunter2\|short\|typo1234\|secret\|Zm9v\|joined' "$settings" && grep -qx 'USERNAME=wheel' "$settings" ||
   fail "passwords and lines it can't read are blanked, even unused" "$(cat "$settings")"
 pass "settings the owner form wouldn't take are skipped, reported and change nothing"
 
@@ -823,6 +917,15 @@ cmp -s "$settings" "$tmp/utf16" && [[ ! -e $profile && ! -s $calls ]] ||
 [[ $(<"$status_file") == *"pimarchy.txt: unread, since it holds NUL bytes"* ]] ||
   fail "the status file says to save pimarchy.txt as plain text" "$(cat "$status_file")"
 pass "a pimarchy.txt saved as UTF-16 is used for nothing, kept, and reported"
+
+# Nor can one whose lines end in a CR alone, as old Mac editors save it.
+reset_headless
+printf 'WIFI_SSID=home\rWIFI_PASSWORD=password1\r' >"$settings"
+cp "$settings" "$tmp/lone-cr"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with lone CR line ends" "$output"
+cmp -s "$settings" "$tmp/lone-cr" && [[ ! -e $profile && ! -s $calls && $(<"$status_file") == *"its lines end in a CR alone"* ]] ||
+  fail "a pimarchy.txt with lone CR line ends is used for nothing, kept, and reported" "$(cat "$status_file")"
+pass "a pimarchy.txt with lone CR line ends is used for nothing, kept, and reported"
 
 # Once first-boot setup is done, pimarchy.txt is left alone.
 reset_headless
