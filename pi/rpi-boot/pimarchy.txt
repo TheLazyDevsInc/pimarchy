@@ -1,0 +1,51 @@
+# Pimarchy headless setup
+#
+# Fill this in on the computer that flashed the card to set the Pi up without
+# a screen or keyboard: delete the "#" in front of a setting and put your value
+# after its "=". Leave the file as it is to set the Pi up at its screen.
+#
+# On its first boot the Pi reads this file, joins your Wi-Fi network, turns SSH
+# on and creates your account, then blanks the passwords below and writes what
+# it did to pimarchy-status.txt next to this file. A few minutes after power
+# on, reach it from your computer with:
+#
+#   ssh USERNAME@HOSTNAME.local
+#
+# A value is used as written. Put it in "double quotes" to keep spaces at its
+# start or end.
+
+# --- Wi-Fi --------------------------------------------------------------------
+# Your network's name and password. For an open network keep the password line,
+# with nothing after the "=".
+#WIFI_SSID=
+#WIFI_PASSWORD=
+# The two-letter code of the country the Pi is in, such as US, GB or DE: the
+# radio uses only the channels allowed there.
+#WIFI_COUNTRY=
+# yes for a network that does not broadcast its name.
+#WIFI_HIDDEN=no
+
+# --- Account ------------------------------------------------------------------
+# Your username (lowercase letters, digits, - and _) and password, which root
+# gets too. PASSWORD_HASH takes a hash of the password instead, so the card
+# never holds it; make one with:  openssl passwd -6
+#USERNAME=
+#PASSWORD=
+#PASSWORD_HASH=
+# Your name and email, for git. Optional.
+#FULL_NAME=
+#EMAIL=
+
+# --- Machine ------------------------------------------------------------------
+# The Pi's name on the network (omarchy unless set), its timezone (UTC unless
+# set) and its keyboard layout (us unless set), such as uk, de or fr.
+#HOSTNAME=
+#TIMEZONE=Europe/London
+#KEYBOARD=us
+
+# --- SSH ----------------------------------------------------------------------
+# SSH is on once this file sets up the account or gives a key. Paste each public
+# key (the contents of ~/.ssh/id_ed25519.pub, say) on its own SSH_KEY line. With
+# a key, password logins are off unless SSH_PASSWORD_LOGIN says yes.
+#SSH_KEY=
+#SSH_PASSWORD_LOGIN=no

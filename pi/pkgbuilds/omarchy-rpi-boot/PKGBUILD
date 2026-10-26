@@ -1,7 +1,8 @@
 # Raspberry Pi boot support for Pimarchy: the lifecycle operations
 # omarchy-lifecycle-dispatch registers for aarch64-rpi (setup-boot and
-# update-verify, see docs/lifecycle-dispatch.md) and the first-boot root
-# partition grower. Its sources are pi/rpi-boot/ in the Pimarchy checkout.
+# update-verify, see docs/lifecycle-dispatch.md), the first-boot root partition
+# grower and the headless first boot from pimarchy.txt. Its sources are
+# pi/rpi-boot/ in the Pimarchy checkout.
 #
 # Built on the Pi from its checkout, like this tree's omarchy and
 # omarchy-settings: OMARCHY_SRC=<checkout> makepkg. pkgver is the base the
@@ -10,7 +11,7 @@
 pkgname=omarchy-rpi-boot
 pkgver=1
 pkgrel=1
-pkgdesc='Raspberry Pi boot support for Omarchy: cmdline.txt and config.txt setup, update verification and first-boot root growth'
+pkgdesc='Raspberry Pi boot support for Omarchy: cmdline.txt and config.txt setup, update verification, first-boot root growth and headless setup'
 arch=('aarch64')
 url='https://github.com/omacom/omarchy'
 license=('MIT')
@@ -20,7 +21,9 @@ license=('MIT')
 # mkinitcpio rebuilds and lists the initramfs (mkinitcpio, lsinitcpio);
 # util-linux finds the root and its disk and repartitions it (findmnt, findfs,
 # blkid, lsblk, sfdisk, partx); e2fsprogs grows the filesystem (resize2fs); gawk
-# reads the partition table.
+# reads the partition table. The headless first boot checks SSH keys and turns
+# the server on (openssh), opens its port (ufw) and sets the Wi-Fi radio's
+# country (wireless-regdb).
 depends=(
   'omarchy'
   'raspberrypi-bootloader'
@@ -29,6 +32,9 @@ depends=(
   'util-linux'
   'e2fsprogs'
   'gawk'
+  'openssh'
+  'ufw'
+  'wireless-regdb'
 )
 source=()
 sha256sums=()
@@ -49,10 +55,13 @@ package() {
   # Lifecycle dispatch runs only root-owned entrypoints in root-owned
   # directories that no one else can write.
   local entrypoint
-  for entrypoint in setup-boot update-verify grow-root; do
+  for entrypoint in setup-boot update-verify grow-root headless; do
     install -Dm755 "$entrypoint" "$pkgdir/usr/lib/omarchy/rpi-boot/$entrypoint"
   done
   install -Dm644 omarchy-rpi-grow-root.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-grow-root.service"
+  install -Dm644 omarchy-rpi-headless.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-headless.service"
+  # The image builder copies it to the boot partition, where its owner fills it in.
+  install -Dm644 pimarchy.txt "$pkgdir/usr/share/omarchy-rpi-boot/pimarchy.txt"
   # The first-boot disk identifier hook, and the drop-in that puts it in HOOKS.
   install -Dm644 initcpio-hook "$pkgdir/usr/lib/initcpio/hooks/omarchy-rpi-disk-id"
   install -Dm644 initcpio-install "$pkgdir/usr/lib/initcpio/install/omarchy-rpi-disk-id"

@@ -160,7 +160,7 @@ sha256sum -c pimarchy-*.img.xz.sha256
 xzcat pimarchy-*.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
-Raspberry Pi Imager works too: choose "Use custom" under the operating system and pick the `.img.xz`. Answer no when it offers OS customisation. That customisation is meant for Raspberry Pi OS, and it edits `cmdline.txt` to run its own first-boot script. balenaEtcher writes the image unchanged.
+Raspberry Pi Imager works too: choose "Use custom" under the operating system and pick the `.img.xz`. Answer no when it offers OS customisation. That customisation is meant for Raspberry Pi OS, and it edits `cmdline.txt` to run its own first-boot script; `pimarchy.txt` does that job here (The first boot, Without a screen). balenaEtcher writes the image unchanged.
 
 ## The first boot
 
@@ -172,7 +172,27 @@ Connect a monitor to the micro-HDMI port next to the power socket, then power on
 4. The setup screen on the first console asks for your keyboard layout, your account and password, the computer's name, and the timezone.
 5. It logs you into Hyprland once. From the next boot on, the login screen asks for your password.
 
-The Pi has no battery-backed clock, so until it reaches the network its clock starts from the time the image was built. Wi-Fi is set up from Omarchy's network menu. SSH stays off, as on any Omarchy install. To turn it on, run `sudo systemctl enable --now sshd` and `sudo ufw allow ssh`.
+The Pi has no battery-backed clock, so until it reaches the network its clock starts from the time the image was built. Wi-Fi is set up from Omarchy's network menu. SSH stays off, as on any Omarchy install, unless `pimarchy.txt` turned it on. To turn it on later, run `omarchy-setup-security-sshd`, which opens the firewall's SSH port and authorizes a key.
+
+### Without a screen
+
+A Pi with no screen or keyboard is set up from `pimarchy.txt` on the card's boot partition instead, as DietPi's `dietpi.txt` sets one up. After flashing, take the card out and put it back in: its boot partition, `BOOT`, opens on Windows, macOS and Linux. Open `pimarchy.txt` in a plain text editor, delete the `#` in front of each setting you want, and put your value after its `=`:
+
+```ini
+WIFI_SSID=Home network
+WIFI_PASSWORD=correct horse battery
+WIFI_COUNTRY=GB
+USERNAME=ada
+PASSWORD=a long password
+HOSTNAME=pi400
+TIMEZONE=Europe/London
+KEYBOARD=uk
+SSH_KEY=ssh-ed25519 AAAAC3Nza... ada@laptop
+```
+
+On its first boot, before the network starts, the Pi reads the file. It sets its Wi-Fi country and joins the network, takes its name and timezone, turns SSH on with port 22 open in the firewall (rate limited), and leaves your account to the setup screen, which then runs on its own with nobody at the Pi. With an `SSH_KEY`, password logins over SSH are off unless `SSH_PASSWORD_LOGIN=yes`. The file's passwords are then blanked where they lie, and `pimarchy-status.txt` beside it lists what was applied and what was skipped, and why. A few minutes after power on, `ssh ada@pi400.local` reaches the Pi; if your computer doesn't resolve `.local` names, find the Pi's address in your router's list of devices. Over Ethernet, leave the Wi-Fi settings out.
+
+`PASSWORD_HASH` takes the password's hash, from `openssl passwd -6`, so the card never holds the password itself. A setting the setup screen wouldn't take, such as a reserved username or a timezone with no such name, is skipped and reported, and without an account the setup screen asks at the Pi as usual. The file is read only while first-boot setup is pending, so editing it after that changes nothing.
 
 ## Updates on the Pi
 

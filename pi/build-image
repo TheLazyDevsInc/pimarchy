@@ -1507,7 +1507,8 @@ FSTAB
 
 # As a deferred-provisioning ISO install arms it (the orchestrator's
 # stage_provisioning_state and configure_login): the owner unit enabled with
-# its pending marker, SDDM set up with no user, no autologin and no state.
+# its pending marker, SDDM set up with no user, no autologin and no state. Then
+# the headless setup that can answer the owner wizard for a Pi with no screen.
 arm_first_boot() {
   local provisioning=$root/var/lib/omarchy/provisioning
   local unit=omarchy-provision-owner.service
@@ -1528,6 +1529,12 @@ arm_first_boot() {
   rm -f -- "$root/etc/sddm.conf.d/autologin.conf" "$root/var/lib/sddm/state.conf" \
     "$root/etc/systemd/system/getty@tty1.service.d/autologin.conf"
   guest systemctl enable sddm.service
+
+  # A Pi with no screen is set up from pimarchy.txt instead, which its owner
+  # fills in on the boot partition after flashing (pi/rpi-boot/headless). It
+  # ships with every setting commented out, and the unit does nothing with it so.
+  install -m 0644 -o 0 -g 0 "$root/usr/share/omarchy-rpi-boot/pimarchy.txt" "$root/boot/pimarchy.txt"
+  guest systemctl enable omarchy-rpi-headless.service
 }
 
 # ── 15. Seal ─────────────────────────────────────────────────────────────────
@@ -1639,6 +1646,11 @@ root_problems() (
   [[ -f $root/etc/sddm.conf.d/99-omarchy-login.conf ]] || problem "SDDM's login config is missing"
   [[ ! -e $root/etc/sddm.conf.d/autologin.conf && ! -e $root/var/lib/sddm/state.conf ]] ||
     problem "SDDM has an autologin or a last user before the owner exists"
+  [[ -L $root/etc/systemd/system/multi-user.target.wants/omarchy-rpi-headless.service ]] ||
+    problem "omarchy-rpi-headless.service is not enabled"
+  # Anything but the template could hand every flashed card someone's settings.
+  cmp -s "$root/usr/share/omarchy-rpi-boot/pimarchy.txt" "$root/boot/pimarchy.txt" ||
+    problem "/boot/pimarchy.txt is not omarchy-rpi-boot's template, with every setting commented out"
 
   # Accounts.
   if grep -q '^alarm:' "$root/etc/passwd" "$root/etc/shadow" "$root/etc/group"; then
@@ -1669,6 +1681,7 @@ root_problems() (
   [[ -L $root/etc/systemd/system/local-fs.target.wants/omarchy-rpi-grow-root.service ]] ||
     problem "omarchy-rpi-grow-root.service is not enabled"
   for path in /usr/lib/omarchy/rpi-boot/setup-boot /usr/lib/omarchy/rpi-boot/update-verify /usr/lib/omarchy/rpi-boot/grow-root \
+    /usr/lib/omarchy/rpi-boot/headless /usr/share/omarchy/install/provisioning/setup-form.sh \
     /etc/limine-entry-tool.d/omarchy-defaults.conf; do
     trusted_path "$path"
   done

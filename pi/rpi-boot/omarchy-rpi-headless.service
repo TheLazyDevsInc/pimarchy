@@ -1,0 +1,20 @@
+# Headless first boot: applies pimarchy.txt on the boot partition once, while
+# first-boot setup is pending (/usr/lib/omarchy/rpi-boot/headless). It writes
+# the Wi-Fi profile and the hostname before NetworkManager and Avahi read them,
+# the timezone and Wi-Fi country before hardware setup derives one from the
+# other, and the account's answers before the owner wizard looks for them.
+[Unit]
+Description=Pimarchy headless setup from pimarchy.txt
+ConditionPathExists=/var/lib/omarchy/provisioning/pending
+ConditionPathExists=/boot/pimarchy.txt
+RequiresMountsFor=/boot /var/lib/omarchy/provisioning
+After=ufw.service
+Before=NetworkManager.service avahi-daemon.service sshd.service
+Before=omarchy-provision-hardware.service omarchy-provision-owner.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy/rpi-boot/headless
+
+[Install]
+WantedBy=multi-user.target

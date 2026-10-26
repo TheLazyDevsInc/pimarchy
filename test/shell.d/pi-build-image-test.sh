@@ -476,9 +476,15 @@ else
   printf 'PARTUUID=%s-02  /      ext4    rw,relatime  0 1\nPARTUUID=%s-01  /boot  vfat    rw,relatime  0 2\n' \
     "$disk_id" "$disk_id" >"$root/etc/fstab"
   : >"$root/var/lib/pimarchy/grow-root-pending"
-  for file in setup-boot update-verify grow-root; do
+  for file in setup-boot update-verify grow-root headless; do
     install -m 0755 /dev/null "$root/usr/lib/omarchy/rpi-boot/$file"
   done
+  mkdir -p "$root/usr/share/omarchy-rpi-boot" "$root/usr/share/omarchy/install/provisioning"
+  : >"$root/usr/share/omarchy/install/provisioning/setup-form.sh"
+  cp "$ROOT/pi/rpi-boot/pimarchy.txt" "$root/usr/share/omarchy-rpi-boot/pimarchy.txt"
+  cp "$ROOT/pi/rpi-boot/pimarchy.txt" "$root/boot/pimarchy.txt"
+  ln -s /usr/lib/systemd/system/omarchy-rpi-headless.service \
+    "$root/etc/systemd/system/multi-user.target.wants/omarchy-rpi-headless.service"
   printf 'KERNEL_CMDLINE[default]="quiet splash"\n' >"$root/etc/limine-entry-tool.d/omarchy-defaults.conf"
   mkdir -p "$root/usr/bin" "$root/var/lib/pacman/local/iptables-1:1.8.13-1"
   printf '%%NAME%%\niptables\n\n%%VERSION%%\n1:1.8.13-1\n' >"$root/var/lib/pacman/local/iptables-1:1.8.13-1/desc"
@@ -555,6 +561,10 @@ else
   printf 'root:$6$hash:20000::::::\n' >"$root/etc/shadow"
   expect_problem "a root whose root password is not locked is refused" "root's password is not locked"
   printf 'root:!:20000::::::\n' >"$root/etc/shadow"
+
+  printf 'WIFI_SSID=home\nWIFI_PASSWORD=secret123\n' >>"$root/boot/pimarchy.txt"
+  expect_problem "a boot partition whose pimarchy.txt someone filled in is refused" "/boot/pimarchy.txt is not omarchy-rpi-boot's template"
+  cp "$ROOT/pi/rpi-boot/pimarchy.txt" "$root/boot/pimarchy.txt"
 
   printf 'root=/dev/mmcblk0p2 rw rootwait pimarchy.new_disk_id=%s\n' "$disk_id" >"$root/boot/cmdline.txt"
   expect_problem "a cmdline.txt that names another root is refused" "does not name root=UUID=$root_fs_uuid with pimarchy.new_disk_id=$disk_id"

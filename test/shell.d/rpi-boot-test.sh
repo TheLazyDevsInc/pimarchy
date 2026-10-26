@@ -6,7 +6,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 # The Raspberry Pi boot package's scripts (pi/rpi-boot): setup-boot and
 # update-verify, which omarchy-lifecycle-dispatch runs on aarch64-rpi, and
-# grow-root, which its first-boot unit runs. Each runs against a fixture root
+# grow-root and headless, which its first-boot units run. Each runs against a fixture root
 # whose /boot holds ALARM's own cmdline.txt and config.txt from linux-rpi
 # 6.18.57-1 (fixtures/rpi-boot), with stubs for the tools that read or change
 # the machine.
@@ -102,13 +102,19 @@ else
   [[ ! -e $state/sfdisk-fails ]] || exit 1
 fi
 SH
-for tool in partx resize2fs systemctl; do
+for tool in partx resize2fs systemctl ufw set-wireless-regdom; do
   cat >"$stubs/$tool" <<SH
 #!/bin/bash
 echo "$tool \$*" >>"$calls"
 [[ ! -e $state/$tool-fails ]] || exit 1
 SH
 done
+# ssh-keygen takes the one key form the tests use.
+cat >"$stubs/ssh-keygen" <<SH
+#!/bin/bash
+echo "ssh-keygen \$*" >>"$calls"
+[[ \$(cat) == "ssh-ed25519 AAAA"* ]]
+SH
 chmod +x "$stubs"/*
 
 # A Pi as ALARM and Omarchy leave it: linux-rpi's own boot files, Omarchy's
@@ -182,7 +188,7 @@ kernel_defaults=$(
 
 reset_root
 before=$(fingerprint)
-for script in setup-boot update-verify grow-root; do
+for script in setup-boot update-verify grow-root headless; do
   status=0
   output=$(on x86 "$script" 2>&1) || status=$?
   (( status == 1 )) && [[ $output == *"this is not a Raspberry Pi"* ]] ||
@@ -198,7 +204,7 @@ touch "$root/var/lib/pimarchy/grow-root-pending"
 [[ $(fingerprint) == "$before" && ! -s $calls ]] || fail "nothing runs or changes off a Raspberry Pi" "$(cat "$calls")"
 pass "every Pi boot script refuses a machine that is not a Raspberry Pi, and changes nothing there"
 
-for script in setup-boot update-verify grow-root; do
+for script in setup-boot update-verify grow-root headless; do
   status=0
   output=$(env -u OMARCHY_RPI_BOOT_ROOT OMARCHY_PROC_ROOT="$tmp/aarch64-rpi/proc" PATH="$stubs:$tmp/aarch64-rpi/bin:$ROOT/bin:$PATH" \
     "$scripts/$script" 2>&1) || status=$?
@@ -212,7 +218,7 @@ for script in setup-boot update-verify grow-root; do
   output=$(/usr/bin/bash "$scripts/$script" -p 2>&1) || status=$?
   (( status == 126 )) || fail "$script refuses an ordinary Bash launch" "status $status: $output"
 done
-for arguments in "setup-boot image-first-boot extra" "setup-boot first-boot" "update-verify now" "grow-root now"; do
+for arguments in "setup-boot image-first-boot extra" "setup-boot first-boot" "update-verify now" "grow-root now" "headless now"; do
   status=0
   output=$(on aarch64-rpi $arguments 2>&1) || status=$?
   (( status == 2 )) && [[ $output == Usage:* ]] || fail "'$arguments' is a usage error" "status $status: $output"
@@ -231,7 +237,7 @@ if unshare --user --map-root-user true 2>/dev/null; then
   mkdir -p "$tmp/as-root"
   printf '#!/bin/bash\nexit 0\n' >"$tmp/as-root/yes"
   chmod +x "$tmp/as-root/yes"
-  for script in setup-boot update-verify grow-root; do
+  for script in setup-boot update-verify grow-root headless; do
     sed "s|/usr/bin/omarchy-hw-aarch64-rpi|$tmp/as-root/yes|" "$scripts/$script" >"$tmp/as-root/$script"
     chmod +x "$tmp/as-root/$script"
     grep -qF "$tmp/as-root/yes" "$tmp/as-root/$script" || fail "$script checks the platform with /usr/bin/omarchy-hw-aarch64-rpi as root"
@@ -668,29 +674,155 @@ grep -qx 'ConditionPathExists=/var/lib/pimarchy/grow-root-pending' "$unit" &&
   grep -qx 'Before=local-fs.target omarchy-provision-hardware.service shutdown.target' "$unit" &&
   grep -qx 'WantedBy=local-fs.target' "$unit" || fail "the unit runs grow-root early, while its marker exists"
 grep -qF 'marker=$fixture/var/lib/pimarchy/grow-root-pending' "$scripts/grow-root" || fail "grow-root removes the unit's marker"
-for script in setup-boot update-verify grow-root; do
+for script in setup-boot update-verify grow-root headless; do
   [[ -x $scripts/$script && $(head -n 1 "$scripts/$script") == "#!/bin/bash -p" ]] || fail "$script is a privileged Bash executable"
 done
 pass "the grow-root unit runs grow-root in early boot while its marker exists, and every Pi boot script is a privileged Bash executable"
+
+# ── headless ─────────────────────────────────────────────────────────────────
+
+# A first boot still pending, with the owner form's rules, two of the countries
+# wireless-regdb lists, a timezone, and the image's pimarchy.txt on /boot.
+settings=$root/boot/pimarchy.txt
+status_file=$root/boot/pimarchy-status.txt
+provisioning=$root/var/lib/omarchy/provisioning
+profile=$root/etc/NetworkManager/system-connections/pimarchy-wifi.nmconnection
+reset_headless() {
+  reset_root
+  mkdir -p "$provisioning" "$root/usr/share/omarchy/install/provisioning" "$root/etc/conf.d" \
+    "$root/usr/share/zoneinfo/Europe" "$root/proc/sys/kernel"
+  : >"$provisioning/pending"
+  cp "$ROOT/install/provisioning/setup-form.sh" "$root/usr/share/omarchy/install/provisioning/"
+  printf '%s\n' '#WIRELESS_REGDOM="DE"' '#WIRELESS_REGDOM="GB"' >"$root/etc/conf.d/wireless-regdom"
+  : >"$root/usr/share/zoneinfo/Europe/London"
+  echo omarchy | tee "$root/etc/hostname" >"$root/proc/sys/kernel/hostname"
+  cp "$scripts/pimarchy.txt" "$settings"
+  chmod -R go-w "$root"
+}
+
+# As the image ships it, every setting commented out: nothing happens.
+reset_headless
+before=$(fingerprint)
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with the image's pimarchy.txt" "$output"
+[[ $(fingerprint) == "$before" && ! -s $calls ]] || fail "the image's pimarchy.txt changes nothing" "$(cat "$calls")"
+pass "pimarchy.txt as the image ships it changes nothing"
+
+# Filled in on Windows: a byte order mark, CRLF line ends, a lower-case key,
+# spaces around an "=", and quotes keeping a password's own spaces.
+reset_headless
+{
+  printf '\xef\xbb\xbf# Filled in on Windows\r\n'
+  printf '%s\r\n' 'WIFI_SSID = Café;Net' 'wifi_password=" s3cret\pass "' 'WIFI_COUNTRY=gb' 'WIFI_HIDDEN=Yes' \
+    'USERNAME=pi4' 'PASSWORD=hunter2!' 'FULL_NAME=Ada Lovelace' 'EMAIL=ada@example.com' 'HOSTNAME=pi400' \
+    'TIMEZONE=Europe/London' 'KEYBOARD=uk' 'SSH_KEY=ssh-ed25519 AAAAC3Nz ada@laptop'
+} >"$settings"
+size=$(stat -c %s "$settings")
+output=$(on aarch64-rpi headless 2>&1) || fail "headless applies a filled-in pimarchy.txt" "$output"
+[[ $(sed 's/^uuid=.*/uuid=/' "$profile") == '[connection]
+id=pimarchy-wifi
+uuid=
+type=wifi
+autoconnect=true
+
+[wifi]
+mode=infrastructure
+ssid=67;97;102;195;169;59;78;101;116;
+hidden=true
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=\ss3cret\\pass\s
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=default
+method=auto' && $(stat -c %a "$profile") == "600" ]] ||
+  fail "NetworkManager gets a root-only profile naming the network by its bytes, with the password escaped" "$(cat "$profile")"
+[[ $(cat "$root/etc/conf.d/wireless-regdom") == $'#WIRELESS_REGDOM="DE"\nWIRELESS_REGDOM="GB"' ]] && grep -q '^set-wireless-regdom' "$calls" ||
+  fail "the radio takes the owner's country" "$(cat "$root/etc/conf.d/wireless-regdom")"
+[[ $(<"$root/etc/hostname") == "pi400" && $(<"$root/proc/sys/kernel/hostname") == "pi400" &&
+  $(readlink "$root/etc/localtime") == "../usr/share/zoneinfo/Europe/London" ]] ||
+  fail "the machine takes its name now and its timezone" "$(<"$root/etc/hostname") $(readlink "$root/etc/localtime")"
+[[ $(<"$provisioning/answers") == $'USERNAME=pi4\nPASSWORD=hunter2!\nFULL_NAME=Ada Lovelace\nEMAIL=ada@example.com\nHOSTNAME=pi400\nTIMEZONE=Europe/London\nKEYBOARD=uk' &&
+  $(stat -c %a "$provisioning/answers") == "600" ]] || fail "first-boot setup gets the account's answers, for root alone" "$(cat "$provisioning/answers")"
+[[ $(<"$provisioning/authorized_keys") == "ssh-ed25519 AAAAC3Nz ada@laptop" ]] &&
+  grep -qx 'PasswordAuthentication no' "$root/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" ||
+  fail "the key is staged for the account, and password logins go"
+grep -qx 'systemctl --no-reload enable sshd.service' "$calls" && grep -qx 'systemctl start --no-block sshd.service' "$calls" &&
+  grep -qx 'ufw limit 22/tcp comment omarchy-sshd' "$calls" || fail "SSH is on and its port open" "$(cat "$calls")"
+[[ $(stat -c %s "$settings") == "$size" ]] && ! grep -q 'hunter2\|s3cret' "$settings" &&
+  (( $(grep -c $'^# *\r$' "$settings") == 2 )) && grep -q $'^WIFI_SSID = Café;Net\r$' "$settings" ||
+  fail "the passwords are blanked in place, and nothing else in pimarchy.txt changes" "$(cat -A "$settings")"
+[[ $(<"$status_file") == *"ssh pi4@pi400.local"* && $(<"$status_file") != *Skipped* ]] ||
+  fail "the status file says how to reach the Pi, and skips nothing" "$(cat "$status_file")"
+pass "a filled-in pimarchy.txt sets up Wi-Fi, the machine, the account's answers and SSH, then loses its passwords"
+
+# The next boot finds the passwords blanked and keeps what the first one set up.
+cp "$profile" "$tmp/profile"
+cp "$provisioning/answers" "$tmp/answers"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs again" "$output"
+cmp -s "$profile" "$tmp/profile" && cmp -s "$provisioning/answers" "$tmp/answers" ||
+  fail "a rerun keeps the Wi-Fi profile and the account's answers"
+[[ $(<"$status_file") == *'Wi-Fi network "Café;Net", set up on an earlier boot'* &&
+  $(<"$status_file") == *"account pi4, set up on an earlier boot"* && $(<"$status_file") != *Skipped* ]] ||
+  fail "a rerun reports what an earlier boot set up" "$(cat "$status_file")"
+pass "a rerun after the passwords are blanked keeps the Wi-Fi profile and the account"
+
+# What the owner form wouldn't take is skipped and reported, and changes nothing.
+reset_headless
+printf '%s\n' 'WIFI_SSID=home' 'WIFI_PASSWORD=short' 'WIFI_COUNTRY=XX' 'USERNAME=root' 'PASSWORD=hunter2!' 'HOSTNAME=-bad-' \
+  'TIMEZONE=../../etc/passwd' 'KEYBOARD=klingon' 'SSH_KEY=not a key' 'COLOUR=blue' 'stray line' >"$settings"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs with settings it can't use" "$output"
+[[ ! -e $profile && ! -e $provisioning/answers && ! -e $provisioning/authorized_keys && ! -e $root/etc/localtime &&
+  ! -e $root/etc/ssh && $(<"$root/etc/hostname") == "omarchy" ]] || fail "settings it can't use change nothing"
+! grep -q 'systemctl\|ufw\|set-wireless-regdom' "$calls" || fail "nothing turns on for settings it can't use" "$(cat "$calls")"
+for key in WIFI_PASSWORD WIFI_COUNTRY USERNAME HOSTNAME TIMEZONE KEYBOARD SSH_KEY COLOUR "a line that sets nothing"; do
+  [[ $(<"$status_file") == *"- $key:"* ]] || fail "the status file names $key as skipped" "$(cat "$status_file")"
+done
+! grep -q 'hunter2\|short' "$settings" || fail "passwords are blanked even when unused"
+pass "settings the owner form wouldn't take are skipped, reported and change nothing"
+
+# A step that fails still blanks the passwords and says so.
+reset_headless
+printf '%s\n' 'HOSTNAME=pi400' 'WIFI_SSID=home' 'WIFI_PASSWORD=password1' >"$settings"
+chmod a-w "$root/proc/sys/kernel/hostname"
+status=0
+output=$(on aarch64-rpi headless 2>&1) || status=$?
+(( status != 0 )) && ! grep -q password1 "$settings" && [[ $(<"$status_file") == *"setup stopped at an error"* ]] ||
+  fail "a failed step still blanks the passwords and reports the error" "status $status: $output"
+pass "a run that fails partway still blanks the passwords and reports the error"
+
+# Once first-boot setup is done, pimarchy.txt is left alone.
+reset_headless
+printf '%s\n' 'WIFI_SSID=home' 'WIFI_PASSWORD=password1' >"$settings"
+rm "$provisioning/pending"
+before=$(fingerprint)
+output=$(on aarch64-rpi headless 2>&1) || fail "headless runs after first-boot setup" "$output"
+[[ $(fingerprint) == "$before" && ! -s $calls ]] || fail "after first-boot setup headless changes nothing" "$(cat "$calls")"
+pass "after first-boot setup pimarchy.txt is left alone"
 
 # ── The package ──────────────────────────────────────────────────────────────
 
 # omarchy-rpi-boot installs each script where the dispatcher and systemd look.
 pkgbuild=$ROOT/pi/pkgbuilds/omarchy-rpi-boot/PKGBUILD
 bash -n "$pkgbuild" || fail "the PKGBUILD parses"
-for script in setup-boot update-verify grow-root; do
+for script in setup-boot update-verify grow-root headless; do
   grep -q "\\b$script\\b" <(grep -A 3 'for entrypoint in' "$pkgbuild") || fail "the package installs $script"
 done
 grep -qF 'install -Dm755 "$entrypoint" "$pkgdir/usr/lib/omarchy/rpi-boot/$entrypoint"' "$pkgbuild" &&
-  grep -qF 'omarchy-rpi-grow-root.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-grow-root.service"' "$pkgbuild" ||
-  fail "the package installs its entrypoints and unit where the dispatcher and systemd look"
+  grep -qF 'omarchy-rpi-grow-root.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-grow-root.service"' "$pkgbuild" &&
+  grep -qF 'omarchy-rpi-headless.service "$pkgdir/usr/lib/systemd/system/omarchy-rpi-headless.service"' "$pkgbuild" &&
+  grep -qF 'pimarchy.txt "$pkgdir/usr/share/omarchy-rpi-boot/pimarchy.txt"' "$pkgbuild" ||
+  fail "the package installs its entrypoints, units and pimarchy.txt where the dispatcher, systemd and the image builder look"
 grep -qF 'initcpio-hook "$pkgdir/usr/lib/initcpio/hooks/omarchy-rpi-disk-id"' "$pkgbuild" &&
   grep -qF 'initcpio-install "$pkgdir/usr/lib/initcpio/install/omarchy-rpi-disk-id"' "$pkgbuild" &&
   grep -qF 'mkinitcpio.conf "$pkgdir/etc/mkinitcpio.conf.d/90-omarchy-rpi-disk-id.conf"' "$pkgbuild" ||
   fail "the package installs the disk identifier hook where mkinitcpio looks"
-[[ $(ls "$scripts") == $'grow-root\ninitcpio-hook\ninitcpio-install\nmkinitcpio.conf\nomarchy-rpi-grow-root.service\nsetup-boot\nupdate-verify' ]] ||
+[[ $(ls "$scripts") == $'grow-root\nheadless\ninitcpio-hook\ninitcpio-install\nmkinitcpio.conf\nomarchy-rpi-grow-root.service\nomarchy-rpi-headless.service\npimarchy.txt\nsetup-boot\nupdate-verify' ]] ||
   fail "the package installs every file in pi/rpi-boot" "$(ls "$scripts")"
-pass "omarchy-rpi-boot installs every Pi boot script, the grow-root unit and the disk identifier hook"
+pass "omarchy-rpi-boot installs every Pi boot script, its units, pimarchy.txt and the disk identifier hook"
 
 # ── The first-boot disk identifier ───────────────────────────────────────────
 
