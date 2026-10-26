@@ -151,6 +151,8 @@ fdtput -t s bcm2711-rpi-400.dtb /soc/usb@7e980000 dr_mode host
 
 QMP's `send-key` command presses keys on that keyboard and `screendump` (with `"format": "png"`) saves the screen.
 
+To try a headless first boot, write a filled-in `pimarchy.txt` to the copy's boot partition (`mcopy -o -i test.img@@1M pimarchy.txt ::pimarchy.txt`), leave the keyboard out, and forward a port to the Pi's SSH with `-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22`; once owner setup has made the account, `ssh -p 2222 <user>@127.0.0.1` reaches it. QEMU's `usb-net` presents itself as a Linux USB Ethernet gadget (`0525:a4a2`), which systemd marks link-local only, so NetworkManager gives it no DHCP address: in the debug shell, `nmcli con mod "Wired connection 1" ipv4.method auto` and `nmcli con up "Wired connection 1"` fix that for the test. A Pi's own Ethernet and Wi-Fi aren't affected.
+
 ## Flashing
 
 Check the image, find the SD card's device (`lsblk` lists it, `/dev/sdX` or `/dev/mmcblkX`), and write the image to the whole card, not to a partition:
