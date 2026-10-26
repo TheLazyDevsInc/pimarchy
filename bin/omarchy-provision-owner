@@ -899,6 +899,9 @@ configure_hostname() {
   [[ -n ${hostname:-} ]] || return 0
   hostnamectl set-hostname "$hostname" 2>&1 ||
     printf '%s\n' "$hostname" >/etc/hostname
+  # Avahi reads the hostname only when it starts, so it would go on announcing
+  # the placeholder as <name>.local until the next boot.
+  systemctl try-restart avahi-daemon.service 2>&1 || true
 }
 
 # Apply the owner's timezone, deferred to first boot with the rest of the user
