@@ -73,10 +73,10 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
             /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/julia* || true
           base=$(df --output=avail,target / /mnt 2>/dev/null | tail -n +2 | sort -n | tail -1 | awk '{print $2}')
-          base=${base%/}
-          sudo install -d -m 0755 "$base/pimarchy-build"
-          echo "WORK=$base/pimarchy-build" >>"$GITHUB_ENV"
-          df -h "$base"
+          work=${base%/}/pimarchy-build
+          sudo install -d -m 0755 "$work"
+          echo "WORK=$work" >>"$GITHUB_ENV"
+          df -h "$work"
 
       - name: Install the builder's tools
         run: |
