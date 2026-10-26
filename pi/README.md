@@ -15,6 +15,10 @@ This directory builds Pimarchy, this fork's Omarchy for the Raspberry Pi 400, as
 - The image carries the Pimarchy checkout it was built from, at `/var/lib/pimarchy/src`. It is on the branch the image was built from, and that branch tracks the `origin` of the checkout the image was built from. The Pi rebuilds its Omarchy packages from it on every update.
 - Nothing in it belongs to one machine: there is no user account, the root account is locked, and there is no machine ID, no SSH host key and no pacman keyring. The hardware setup an install would run is queued for the Pi's first boot, so it runs on the Pi rather than on the computer that built the image.
 
+## Releases
+
+The `Pi image` workflow (`.github/workflows/pi-image.yml`) builds the image on GitHub's arm64 runners, where the image's programs run natively, and publishes it as a prerelease. Pushing a tag that starts with `pi-` builds the tagged commit into a release of that tag; once the workflow is on the default branch, running it by hand builds the branch it runs on. The image follows `quattro` when `quattro` holds the commit, and otherwise the branch that does. A release file can't be over 2 GiB, so the image is attached in parts with the checksum of the whole, and the release notes give the `cat` command that joins them. A fork runs no workflows until they are enabled on its Actions tab, and the workflow needs write access to the repository's contents to publish.
+
 ## Building an image
 
 `pi/build-image` runs on an x86_64 or aarch64 Linux computer, as root. It needs no loop devices and leaves no mounts behind. It runs every command meant for the image inside the image root, so package installs, scriptlets and Omarchy's own setup run as they would on the Pi, only slower on x86_64. It has two ways to do that, and picks one with `--runner`:

@@ -1,0 +1,122 @@
+name: Pi image
+
+# Builds the Raspberry Pi 400 SD-card image with pi/build-image on an arm64
+# runner, where the image's programs run natively, and publishes it as a
+# release. A pushed pi-* tag builds its commit into a release of that tag; a
+# manual run (once this file is on the default branch) builds the branch it is
+# run on into a release named after the image.
+#
+# A release asset can't be over 2 GiB and the image is larger, so it is attached
+# in parts with the checksum of the whole; the release notes say how to join
+# them.
+
+on:
+  push:
+    tags:
+      - "pi-*"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Omarchy channel the image follows
+        type: choice
+        options: [stable, rc, edge]
+        default: stable
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pi-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    env:
+      CHANNEL: ${{ inputs.channel || 'stable' }}
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@v4
+        with:
+          # Package versions count commits, and the image's own checkout is a
+          # partial clone of this one.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Put the commit on the branch the Pi follows
+        run: |
+          # The Pi updates from origin's copy of the branch its checkout is on.
+          # A tag names no branch, so it follows quattro when quattro holds the
+          # commit, and otherwise the branch that does.
+          if [[ $GITHUB_REF_TYPE == "branch" ]]; then
+            branch=$GITHUB_REF_NAME
+          elif git merge-base --is-ancestor "$GITHUB_SHA" origin/quattro; then
+            branch=quattro
+          else
+            branch=$(git for-each-ref --contains "$GITHUB_SHA" --format='%(refname:lstrip=3)' refs/remotes/origin |
+              grep -vx HEAD | head -1)
+          fi
+          if [[ -z $branch ]]; then
+            echo "::error::No branch on origin holds $GITHUB_SHA, so the Pi would have nothing to update from"
+            exit 1
+          fi
+          git checkout -q -B "$branch" "$GITHUB_SHA"
+          echo "BRANCH=$branch" >>"$GITHUB_ENV"
+          echo "Building $GITHUB_SHA on $branch"
+
+      - name: Make room for the build
+        run: |
+          # A full build takes about 25 GiB. Drop the runner's preinstalled
+          # toolchains, then build on whichever disk has the most room.
+          df -h / /mnt 2>/dev/null || df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/julia* || true
+          base=$(df --output=avail,target / /mnt 2>/dev/null | tail -n +2 | sort -n | tail -1 | awk '{print $2}')
+          base=${base%/}
+          sudo install -d -m 0755 "$base/pimarchy-build"
+          echo "WORK=$base/pimarchy-build" >>"$GITHUB_ENV"
+          df -h "$base"
+
+      - name: Install the builder's tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libarchive-tools dosfstools mtools e2fsprogs fdisk util-linux xz-utils git curl
+
+      - name: Build the image
+        run: |
+          sudo pi/build-image --output "$WORK/out" --cache "$WORK/cache" --ref "$BRANCH" --channel "$CHANNEL"
+          sudo chown -R "$(id -u):$(id -g)" "$WORK/out"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$WORK/out"
+          image=$(ls pimarchy-*.img.xz)
+          name=${image%.img.xz}
+          if [[ $GITHUB_REF_TYPE == "tag" ]]; then
+            tag=$GITHUB_REF_NAME
+          else
+            tag=$name
+          fi
+          split -b 1900M -d -a 1 "$image" "$image.part"
+          parts=("$image".part?)
+          last=$(( ${#parts[@]} - 1 ))
+          {
+            echo "Pimarchy for the Raspberry Pi 400, built from $GITHUB_SHA on \`$BRANCH\` ($CHANNEL channel)."
+            echo
+            echo "The image is attached in ${#parts[@]} parts, since a release file can't be over 2 GiB. Download every \`$image.part*\` file and \`$image.sha256\` into one folder, then join and check them (macOS or Linux):"
+            echo
+            echo '```bash'
+            echo "cat $image.part{0..$last} > $image"
+            echo "shasum -a 256 -c $image.sha256    # or sha256sum -c on Linux; must print OK"
+            echo '```'
+            echo
+            echo "Flash \`$image\` with Raspberry Pi Imager (Raspberry Pi 400, Use Custom, and No to OS customisation) or \`xzcat $image | sudo dd of=/dev/sdX bs=4M conv=fsync\`. See [pi/README.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/pi/README.md) for the first boot."
+            echo
+            echo "sha256 of \`$image\`: \`$(cut -d' ' -f1 "$image.sha256")\`"
+          } >notes.md
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$name" --notes-file notes.md --prerelease \
+            "${parts[@]}" "$image.sha256" build.log
