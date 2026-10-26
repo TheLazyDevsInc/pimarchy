@@ -21,6 +21,8 @@
 # the variables these prompts write: keyboard, keyboard_label,
 # keyboard_input_method, keyboard_xkb_layout, username,
 # password, password_confirmation, full_name, email_address, hostname, timezone.
+# omarchy_keyboard_select sets the keyboard ones without a prompt, for a setup
+# that has its answers already.
 
 OMARCHY_FORM_BACK=1
 OMARCHY_FORM_SIGNAL=130
@@ -119,6 +121,21 @@ omarchy_prompt_keyboard() {
 
   local selection
   selection=$(printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$choice" '$1==c{print; exit}')
+  [[ -n $selection ]] || return 1
+  IFS='|' read -r keyboard_label keyboard keyboard_input_method keyboard_xkb_layout <<< "$selection"
+  keyboard_input_method=${keyboard_input_method:-none}
+  keyboard_xkb_layout=${keyboard_xkb_layout:-}
+}
+
+# Selects a layout without asking: $1 names it by its label in the list above or
+# by its console keymap (the first row with that keymap, so "us" is English
+# (US)). Sets what omarchy_prompt_keyboard sets, or fails for a name no row has.
+omarchy_keyboard_select() {
+  local selection
+
+  selection=$(printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$1" '$1==c{print; exit}')
+  [[ -n $selection ]] ||
+    selection=$(printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$1" '$2==c{print; exit}')
   [[ -n $selection ]] || return 1
   IFS='|' read -r keyboard_label keyboard keyboard_input_method keyboard_xkb_layout <<< "$selection"
   keyboard_input_method=${keyboard_input_method:-none}

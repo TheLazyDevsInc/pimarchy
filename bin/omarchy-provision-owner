@@ -807,8 +807,15 @@ create_user() {
       ${full_name:+-c "$full_name"} "$username"
   fi
 
-  printf '%s:%s\n' "$username" "$password" | chpasswd
-  printf '%s:%s\n' root "$password" | chpasswd
+  # Unattended answers may carry the password's crypt(3) hash rather than the
+  # password.
+  if [[ -n ${password_hash:-} ]]; then
+    printf '%s:%s\n' "$username" "$password_hash" | chpasswd -e
+    printf '%s:%s\n' root "$password_hash" | chpasswd -e
+  else
+    printf '%s:%s\n' "$username" "$password" | chpasswd
+    printf '%s:%s\n' root "$password" | chpasswd
+  fi
 
   # deferred-provisioning installs skip archinstall's create_users, which is what normally
   # uncomments %wheel in /etc/sudoers. Always write the drop-in: detecting an
@@ -839,6 +846,12 @@ configure_login() {
   mkdir -p /var/lib/sddm
   printf '[Last]\nSession=omarchy.desktop\nUser=%s\n' "$username" >/var/lib/sddm/state.conf
   chown -R sddm:sddm /var/lib/sddm 2>/dev/null || true
+
+  # Nobody authenticated at the screen in an unattended setup, so the display
+  # manager asks for the password, as on any later boot.
+  if (( ${UNATTENDED:-0} )); then
+    return 0
+  fi
 
   # Autologin straight into the desktop after first-boot setup — the owner just
   # authenticated in the form, so we don't make them retype at SDDM.
@@ -1176,7 +1189,8 @@ reset_limine_config() {
 }
 
 cleanup_oem_state() {
-  rm -f "$PROVISIONING_DIR/pending" "$PROVISIONING_DIR/authorized_keys" "$PROVISIONING_DIR/setup-user" "$REKEY_STATE"
+  rm -f "$PROVISIONING_DIR/pending" "$PROVISIONING_DIR/authorized_keys" "$PROVISIONING_DIR/setup-user" "$REKEY_STATE" \
+    "$PROVISIONING_DIR/answers"
 
   rm -f /etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service
   systemctl daemon-reload 2>/dev/null || true
@@ -1320,6 +1334,130 @@ run_setup() {
   # Omarchy..." card would only add a flash of screen before the handoff.
 }
 
+# ── Unattended setup ─────────────────────────────────────────────────────────
+#
+# Setup with nobody at the screen. Whatever set the machine up that way (a
+# headless Raspberry Pi's pimarchy.txt, say) leaves the form's answers in
+# $PROVISIONING_DIR/answers, a root-only file of KEY=value lines: KEYBOARD (a
+# layout's label, or its console keymap), USERNAME, PASSWORD or PASSWORD_HASH
+# (crypt(3), as chpasswd -e takes it), FULL_NAME, EMAIL, HOSTNAME and TIMEZONE.
+# They are read as data and checked by the form's own rules, then setup runs as
+# it does once the owner accepts the form, with the progress bar on tty1.
+UNATTENDED=0
+
+load_answers() {
+  local file=$PROVISIONING_DIR/answers line key value owner mode pinned=""
+  local layout="" given_password="" given_hash=""
+
+  if [[ ! -f $file || -L $file ]]; then
+    log_step "unattended setup: $file is not a regular file"
+    return 1
+  fi
+  read -r owner mode < <(stat -c '%u %a' -- "$file") || return 1
+  if (( owner != EUID || (8#$mode & 8#077) != 0 )); then
+    log_step "unattended setup: refusing $file, which only root may read"
+    return 1
+  fi
+
+  username="" password="" password_hash="" full_name="" email_address="" hostname="" timezone=""
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ $line == *=* ]] || continue
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+      KEYBOARD) layout=$value ;;
+      USERNAME) username=$value ;;
+      PASSWORD) given_password=$value ;;
+      PASSWORD_HASH) given_hash=$value ;;
+      FULL_NAME) full_name=$value ;;
+      EMAIL) email_address=$value ;;
+      HOSTNAME) hostname=$value ;;
+      TIMEZONE) timezone=$value ;;
+    esac
+  done <"$file"
+
+  layout=${layout:-${OMARCHY_FORM_KEYBOARD_DEFAULT:-English (US)}}
+  if ! omarchy_keyboard_select "$layout"; then
+    log_step "unattended setup: no keyboard layout is named $layout"
+    return 1
+  fi
+
+  if [[ ! $username =~ $OMARCHY_USERNAME_PATTERN || $username =~ $OMARCHY_RESERVED_USERNAMES ]]; then
+    log_step "unattended setup: the username is not one the form accepts"
+    return 1
+  fi
+  # A retry resumes the account an earlier attempt pinned, as the form does.
+  if [[ -f $PROVISIONING_DIR/setup-user ]]; then
+    pinned=$(<"$PROVISIONING_DIR/setup-user")
+  fi
+  if [[ -n $pinned ]]; then
+    if [[ $username != "$pinned" ]]; then
+      log_step "unattended setup: an earlier attempt set up $pinned, not $username"
+      return 1
+    fi
+  elif omarchy_username_taken "$username"; then
+    log_step "unattended setup: $username already exists on this machine"
+    return 1
+  fi
+
+  if [[ -n $given_hash ]]; then
+    if [[ ! $given_hash =~ ^\$[0-9a-z]+\$[^:[:space:]]+$ ]]; then
+      log_step "unattended setup: PASSWORD_HASH is not a crypt(3) hash"
+      return 1
+    fi
+    # Re-keying the disk needs the password itself.
+    if luks_rekey_pending; then
+      log_step "unattended setup: this machine's disk is re-keyed to the owner's password, which a hash cannot do"
+      return 1
+    fi
+    password_hash=$given_hash
+  elif [[ -n $given_password ]]; then
+    password=$given_password
+  else
+    log_step "unattended setup: there is no password"
+    return 1
+  fi
+
+  if [[ -z $hostname ]]; then
+    hostname=$OMARCHY_HOSTNAME_DEFAULT
+  elif [[ ! $hostname =~ $OMARCHY_HOSTNAME_PATTERN ]]; then
+    log_step "unattended setup: $hostname is not a hostname the form accepts"
+    return 1
+  fi
+
+  timezone=${timezone:-${OMARCHY_FORM_TIMEZONE_DEFAULT:-UTC}}
+  if ! timedatectl list-timezones 2>/dev/null | grep -qxF -- "$timezone"; then
+    log_step "unattended setup: no timezone is named $timezone"
+    return 1
+  fi
+
+  log_step "unattended setup for $username on $hostname ($timezone, $keyboard_label)"
+}
+
+# The answers stand in for the form: the layout is applied as the keyboard step
+# applies an accepted one, the account step and its confirmation have nothing
+# left to ask, and anything the form would ask again ends the attempt instead.
+run_unattended() {
+  UNATTENDED=1
+  touch "$LOG_FILE"
+  chmod 600 "$LOG_FILE"
+  load_answers || return 1
+
+  keyboard_form() {
+    apply_keyboard "$keyboard" || return 1
+    omarchy_persist_input_selection
+  }
+  user_form() { :; }
+  confirm_form() { :; }
+  notice() {
+    log_step "unattended setup: $1"
+    exit 1
+  }
+
+  run_setup
+}
+
 # A failed first-boot setup must not strand the machine at a user-less login
 # screen. Each attempt runs as its own process — bash ignores errexit inside
 # `while !` conditions, but a child process keeps its own set -e — and failure
@@ -1329,7 +1467,23 @@ if [[ ${1:-} == "--attempt" ]]; then
   exit 0
 fi
 
+if [[ ${1:-} == "--unattended" ]]; then
+  run_unattended
+  exit 0
+fi
+
 main() {
+  # Answers left for a setup with nobody at the screen go first. If they fail,
+  # the form asks on the screen as it would have, and they stay for the next
+  # boot.
+  if [[ -e $PROVISIONING_DIR/answers ]]; then
+    if "$0" --unattended; then
+      return 0
+    fi
+    log_step "unattended setup failed; asking on the screen instead"
+  fi
+
+
   # Font sizing waits for the console to settle, so it lives inside
   # greeter_screen (which owns that settle) rather than running here on a VT
   # that may still be in a transitional mode this early in first boot.
