@@ -17,7 +17,8 @@
 // Releases are found without GitHub's API, whose unauthenticated limit counts
 // every Worker sharing an address: the repository's releases.atom feed lists
 // the tags, newest first, and each release's pimarchy.json (pi/release-manifest)
-// names its parts. REPO, in wrangler.toml, names the repository.
+// names its parts. REPO, in wrangler.toml, names the repository; GITHUB, unset
+// there, points the tests at a stand-in for github.com.
 
 const GITHUB = 'https://github.com'
 // How long the feed and the manifests are cached, in seconds.
@@ -33,8 +34,8 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/
 const HEADERS = { 'User-Agent': 'pimarchy-download-worker' }
 
 // The tags in the repository's releases.atom feed, newest first.
-export function tagsFromFeed(xml, repo) {
-  const prefix = `${GITHUB}/${repo}/releases/tag/`
+export function tagsFromFeed(xml, repo, origin = GITHUB) {
+  const prefix = `${origin}/${repo}/releases/tag/`
   const tags = []
   for (const match of xml.matchAll(/<link[^>]*\shref="([^"]+)"/g)) {
     if (!match[1].startsWith(prefix)) continue
@@ -100,8 +101,8 @@ export function slices(parts, start, end) {
   return out
 }
 
-function downloadUrl(repo, tag, name) {
-  return `${GITHUB}/${repo}/releases/download/${encodeURIComponent(tag)}/${name}`
+function downloadUrl(origin, repo, tag, name) {
+  return `${origin}/${repo}/releases/download/${encodeURIComponent(tag)}/${name}`
 }
 
 // The text at url, cached for ttl seconds; null for a 404. Any other failure
@@ -113,8 +114,8 @@ async function cachedText(url, ttl) {
   return response.text()
 }
 
-async function manifestFor(repo, tag) {
-  const text = await cachedText(downloadUrl(repo, tag, 'pimarchy.json'), MANIFEST_TTL)
+async function manifestFor(origin, repo, tag) {
+  const text = await cachedText(downloadUrl(origin, repo, tag, 'pimarchy.json'), MANIFEST_TTL)
   if (text === null) return null
   let manifest
   try {
@@ -127,15 +128,15 @@ async function manifestFor(repo, tag) {
 
 // The release a path names, with its manifest: the newest one with a manifest
 // for "latest", or the one with that tag.
-async function findRelease(repo, name) {
+async function findRelease(origin, repo, name) {
   if (name !== 'latest') {
-    const manifest = await manifestFor(repo, name)
+    const manifest = await manifestFor(origin, repo, name)
     return manifest && { tag: name, manifest }
   }
-  const feed = await cachedText(`${GITHUB}/${repo}/releases.atom`, FEED_TTL)
+  const feed = await cachedText(`${origin}/${repo}/releases.atom`, FEED_TTL)
   if (feed === null) throw new Error('GitHub did not send the releases feed')
-  for (const tag of tagsFromFeed(feed, repo).slice(0, RELEASES_TRIED)) {
-    const manifest = await manifestFor(repo, tag)
+  for (const tag of tagsFromFeed(feed, repo, origin).slice(0, RELEASES_TRIED)) {
+    const manifest = await manifestFor(origin, repo, tag)
     if (manifest) return { tag, manifest }
   }
   return null
@@ -144,11 +145,11 @@ async function findRelease(repo, name) {
 // Streams bytes start to end of the image into writable, part by part. A part
 // that doesn't send exactly the bytes asked for ends the stream with an error,
 // so the client sees a failed download rather than a wrong image.
-async function pump(repo, tag, manifest, start, end, writable) {
+async function pump(origin, repo, tag, manifest, start, end, writable) {
   try {
     for (const slice of slices(manifest.parts, start, end)) {
       const whole = slice.from === 0 && slice.to === slice.size - 1
-      const response = await fetch(downloadUrl(repo, tag, slice.name), {
+      const response = await fetch(downloadUrl(origin, repo, tag, slice.name), {
         headers: whole ? HEADERS : { ...HEADERS, Range: `bytes=${slice.from}-${slice.to}` },
       })
       const length = Number(response.headers.get('Content-Length'))
@@ -183,6 +184,7 @@ On macOS and Linux, pi/flash in the repository writes it to a card and fills in 
 
 export async function handle(request, env, ctx) {
   const repo = env.REPO
+  const origin = env.GITHUB || GITHUB
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return text(405, 'Only GET and HEAD.\n', { Allow: 'GET, HEAD' })
   }
@@ -200,7 +202,7 @@ export async function handle(request, env, ctx) {
 
   let release
   try {
-    release = await findRelease(repo, name)
+    release = await findRelease(origin, repo, name)
   } catch (error) {
     return text(502, `${error.message}. Try again in a minute.\n`)
   }
@@ -236,17 +238,18 @@ export async function handle(request, env, ctx) {
   }
   if (range) headers['Content-Range'] = `bytes ${start}-${end}/${size}`
   const status = range ? 206 : 200
+  // The runtime keeps a HEAD response's own Content-Length. A FixedLengthStream
+  // left unread here would read as a Worker that hung, and fail the request.
+  if (request.method === 'HEAD') return new Response(null, { status, headers })
+
   // A FixedLengthStream gives the response its Content-Length, and fails a body
   // of any other length. The Workers runtime pipes fetch bodies into it without
   // running JavaScript, so a long download costs no CPU time; elsewhere (in the
   // tests) a TransformStream stands in.
-  const fixed = typeof FixedLengthStream === 'function'
-  if (request.method === 'HEAD') {
-    // The runtime sends a HEAD response's length from its body's, unread.
-    return new Response(fixed ? new FixedLengthStream(size).readable : null, { status, headers })
-  }
-  const { readable, writable } = fixed ? new FixedLengthStream(end - start + 1) : new TransformStream()
-  const pumping = pump(repo, tag, manifest, start, end, writable)
+  const { readable, writable } = typeof FixedLengthStream === 'function'
+    ? new FixedLengthStream(end - start + 1)
+    : new TransformStream()
+  const pumping = pump(origin, repo, tag, manifest, start, end, writable)
   if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(pumping)
   return new Response(readable, { status, headers })
 }
