@@ -1,0 +1,9 @@
+# The Pimarchy download Worker (worker.mjs): deploy with "npx wrangler deploy"
+# from this directory, or paste worker.mjs into a new Worker in Cloudflare's
+# dashboard and add the REPO variable there.
+name = "pimarchy"
+main = "worker.mjs"
+compatibility_date = "2025-09-01"
+
+[vars]
+REPO = "TheLazyDevsInc/pimarchy"

@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# Writes the manifest a Pimarchy release carries beside its image, pimarchy.json:
+# the image's name, size, checksum and size once unpacked, and the parts GitHub
+# holds it in (no release file may reach 2 GiB). pi/flash and the download
+# Worker (pi/worker) read it to find a release's image without GitHub's API.
+# The release workflow (.github/workflows/pi-image.yml) runs it:
+#
+#   pi/release-manifest IMAGE.img.xz PART... >pimarchy.json
+#
+# Each field and each part is on a line of its own, so a shell can read it with
+# sed as well as a JavaScript one with JSON.parse.
+
+set -euo pipefail
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+if (( $# < 2 )); then
+  echo "Usage: pi/release-manifest IMAGE.img.xz PART..." >&2
+  exit 2
+fi
+image=$1
+shift
+
+# Names go into JSON and URLs as they are, so they hold nothing either escapes.
+safe_name() {
+  [[ ${1##*/} =~ ^[A-Za-z0-9._+-]+$ ]]
+}
+
+[[ -f $image && $image == *.img.xz ]] || fail "$image is not an .img.xz file"
+safe_name "$image" || fail "${image##*/} has characters a URL or JSON would escape"
+size=$(stat -c %s -- "$image")
+total=0
+for part in "$@"; do
+  [[ -f $part ]] || fail "$part is not a file"
+  safe_name "$part" || fail "${part##*/} has characters a URL or JSON would escape"
+  total=$(( total + $(stat -c %s -- "$part") ))
+done
+(( total == size )) || fail "the parts hold $total bytes, and the image $size"
+
+sha256=$(sha256sum -- "$image" | cut -d' ' -f1)
+[[ $(cat -- "$@" | sha256sum | cut -d' ' -f1) == "$sha256" ]] || fail "the parts, joined in order, are not the image"
+image_size=$(xz --robot --list -- "$image" | awk -F'\t' '$1 == "totals" { print $5 }')
+[[ $image_size =~ ^[1-9][0-9]*$ ]] || fail "xz cannot tell the size of $image unpacked"
+
+printf '{\n  "format": 1,\n  "image": "%s",\n  "size": %s,\n  "sha256": "%s",\n  "image_size": %s,\n  "parts": [\n' \
+  "${image##*/}" "$size" "$sha256" "$image_size"
+count=$#
+for part in "$@"; do
+  count=$(( count - 1 ))
+  if (( count > 0 )); then
+    separator=","
+  else
+    separator=""
+  fi
+  printf '    {"name": "%s", "size": %s}%s\n' "${part##*/}" "$(stat -c %s -- "$part")" "$separator"
+done
+printf '  ]\n}\n'

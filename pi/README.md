@@ -17,7 +17,9 @@ This directory builds Pimarchy, this fork's Omarchy for the Raspberry Pi 400, as
 
 ## Releases
 
-The `Pi image` workflow (`.github/workflows/pi-image.yml`) builds the image on GitHub's arm64 runners, where the image's programs run natively, and publishes it as a prerelease. Pushing a tag that starts with `pi-` builds the tagged commit into a release of that tag; once the workflow is on the default branch, running it by hand builds the branch it runs on. The image follows `quattro` when `quattro` holds the commit, and otherwise the branch that does. A release file can't be over 2 GiB, so the image is attached in parts with the checksum of the whole, and the release notes give the `cat` command that joins them. A fork runs no workflows until they are enabled on its Actions tab, and the workflow needs write access to the repository's contents to publish. When the repository's Actions variables name a Cloudflare R2 bucket (`R2_BUCKET`, and `R2_PUBLIC_URL` for its public address) and its secrets hold the bucket's S3 endpoint and an API token for it (`R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`), the workflow also uploads the image there in one piece, under its own name and as `pimarchy-latest-<channel>.img.xz`, and the release notes give that address for balenaEtcher's "Flash from URL".
+The `Pi image` workflow (`.github/workflows/pi-image.yml`) builds the image on GitHub's arm64 runners, where the image's programs run natively, and publishes it as a prerelease. Pushing a tag that starts with `pi-` builds the tagged commit into a release of that tag; once the workflow is on the default branch, running it by hand builds the branch it runs on. The image follows `quattro` when `quattro` holds the commit, and otherwise the branch that does. A release file can't be over 2 GiB, so the image is attached in parts with the checksum of the whole, and the release notes give the `cat` command that joins them. Each release also carries `pimarchy.json` (`pi/release-manifest`): the image's name, size, checksum and size once unpacked, and its parts, which `pi/flash` and the download Worker read to find them without GitHub's API. A fork runs no workflows until they are enabled on its Actions tab, and the workflow needs write access to the repository's contents to publish.
+
+The download Worker (`pi/worker/worker.mjs`, a Cloudflare Worker) serves each release's image as one file, for tools that flash from a URL: `/latest.img.xz` is the newest release's, and `/<tag>.img.xz` a given one's, with `.sha256` and `.json` beside them. It stores nothing: it finds releases through the repository's `releases.atom` feed and their manifests, and streams the parts from GitHub joined, answering a byte range by reading only the parts it covers. Deploy it with `npx wrangler deploy` in `pi/worker/`, whose `wrangler.toml` names the repository, or paste `worker.mjs` into a new Worker in Cloudflare's dashboard and set its `REPO` variable. When the repository's Actions variables name a Cloudflare R2 bucket (`R2_BUCKET`, and `R2_PUBLIC_URL` for its public address) and its secrets hold the bucket's S3 endpoint and an API token for it (`R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`), the workflow also uploads the image there in one piece, under its own name and as `pimarchy-latest-<channel>.img.xz`, and the release notes give that address for balenaEtcher's "Flash from URL".
 
 ## Building an image
 
@@ -155,7 +157,16 @@ To try a headless first boot, write a filled-in `pimarchy.txt` to the copy's boo
 
 ## Flashing
 
-Check the image, find the SD card's device (`lsblk` lists it, `/dev/sdX` or `/dev/mmcblkX`), and write the image to the whole card, not to a partition:
+On macOS or Linux, `pi/flash` does it all: it asks what `pimarchy.txt` should say, lists only removable disks other than the ones the computer runs from, and once the card's name is typed back, streams the newest release from GitHub onto it, the parts joined and checked against the image's checksum on the way, then fills in `pimarchy.txt` (The first boot, Without a screen). Each release's notes give the command for its own copy:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TheLazyDevsInc/pimarchy/<commit>/pi/flash -o flash
+bash flash                      # --release TAG, --disk /dev/sdX, --no-setup
+```
+
+It needs `curl`, `xz` (macOS has none, and its own `gzip` reads `.xz` instead) and `sudo` to write the card, and runs on the Bash 3.2 macOS ships. It writes the account's password as its SHA-512 crypt hash, from `openssl passwd -6` or, as macOS's LibreSSL can't make one, from Perl, so the card never holds the password itself; without either it writes the password, which the Pi blanks once it has used it. macOS may ask once whether Terminal may use removable volumes. On Windows, give balenaEtcher's "Flash from URL" the download Worker's `/latest.img.xz` (Releases), then fill in `pimarchy.txt` by hand.
+
+To write a downloaded image by hand, check it, find the SD card's device (`lsblk` lists it, `/dev/sdX` or `/dev/mmcblkX`), and write the image to the whole card, not to a partition:
 
 ```bash
 sha256sum -c pimarchy-*.img.xz.sha256
