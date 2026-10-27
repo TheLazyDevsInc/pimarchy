@@ -56,9 +56,11 @@ files[`${base}/releases.atom`] = Buffer.from(`<?xml version="1.0"?><feed>
 
 let requests = []
 let ignoreRanges = false
+const failing = new Set()
 globalThis.fetch = async (url, init = {}) => {
   const range = (init.headers || {}).Range
   requests.push(range ? `${url} ${range}` : url)
+  if (failing.has(url)) return new Response('Unicorn', { status: 500 })
   const body = files[url]
   if (!body) return new Response('Not Found', { status: 404 })
   const match = range && !ignoreRanges && /^bytes=(\d+)-(\d+)$/.exec(range)
@@ -80,11 +82,18 @@ const parts = (release) => Object.keys(files).filter((url) => url.includes(`/${r
     worker.default.fetch(new Request(`https://pimarchy.example.workers.dev${path}`, { method, headers }), env, {})
   const bytes = async (response) => Buffer.from(await response.arrayBuffer())
 
+  // The latest image is a redirect to the newest release's own, so a client
+  // reads its size and its bytes from the one release.
   let response = await get('/latest.img.xz')
+  assert(response.status === 302 && response.headers.get('Location') === 'https://pimarchy.example.workers.dev/rel2.img.xz' &&
+    response.headers.get('Cache-Control') === 'no-store',
+    'the latest image redirects, uncached, to the newest release with a manifest',
+    `status ${response.status}, ${response.headers.get('Location')}`)
+  assert(!requests.some((r) => r.includes('.part')), 'the redirect reads no part')
+  response = await get('/rel2.img.xz')
   let body = await bytes(response)
   assert(response.status === 200 && body.equals(image('rel2')),
-    'the newest release with a manifest is served whole, its parts joined in order',
-    `status ${response.status}, ${body.length} bytes`)
+    'a release is served whole, its parts joined in order', `status ${response.status}, ${body.length} bytes`)
   assertEqual(response.headers.get('Content-Length'), String(image('rel2').length), 'the whole image has its length')
   assertEqual(response.headers.get('Accept-Ranges'), 'bytes', 'byte ranges are offered')
   assertEqual(response.headers.get('Content-Disposition'), 'attachment; filename="rel2.img.xz"', 'the download is named after the image')
@@ -94,7 +103,7 @@ const parts = (release) => Object.keys(files).filter((url) => url.includes(`/${r
 
   // A range across the boundary of the first two parts reads only them.
   requests = []
-  response = await get('/latest.img.xz', { Range: 'bytes=350-450' })
+  response = await get('/rel2.img.xz', { Range: 'bytes=350-450' })
   body = await bytes(response)
   assert(response.status === 206 && body.equals(image('rel2').subarray(350, 451)),
     'a range across two parts is served from them', `status ${response.status}`)
@@ -106,26 +115,31 @@ const parts = (release) => Object.keys(files).filter((url) => url.includes(`/${r
   // A suffix range, as a reader of the xz index at the end of the image asks.
   requests = []
   const size = image('rel2').length
-  response = await get('/latest.img.xz', { Range: 'bytes=-100' })
+  response = await get('/rel2.img.xz', { Range: 'bytes=-100' })
   body = await bytes(response)
   assert(response.status === 206 && body.equals(image('rel2').subarray(size - 100)), 'the last bytes are served for a suffix range')
   assertEqual(requests.filter((r) => r.includes('.part')).length, size % 400 >= 100 ? 1 : 2, 'a suffix range reads the last parts only')
 
-  response = await get('/latest.img.xz', { Range: `bytes=${size}-` })
+  response = await get('/rel2.img.xz', { Range: `bytes=${size}-` })
   assert(response.status === 416 && response.headers.get('Content-Range') === `bytes */${size}`,
     'a range past the end is refused', `status ${response.status}`)
-  response = await get('/latest.img.xz', { Range: 'bytes=0-10', 'If-Range': '"stale"' })
+  response = await get('/rel2.img.xz', { Range: 'bytes=0-10', 'If-Range': '"stale"' })
   assert(response.status === 200 && (await bytes(response)).equals(image('rel2')), 'a range for another version of the image gets the whole image')
 
   requests = []
-  response = await get('/latest.img.xz', {}, 'HEAD')
+  response = await get('/rel2.img.xz', {}, 'HEAD')
   assert(response.status === 200 && response.headers.get('Content-Length') === String(size) && !requests.some((r) => r.includes('.part')),
     'HEAD answers with the length and reads no part')
+  response = await get('/rel2.img.xz', { Range: 'bytes=0-10' }, 'HEAD')
+  assert(response.status === 200 && response.headers.get('Content-Length') === String(size) && !response.headers.get('Content-Range'),
+    'HEAD describes the whole image, a range or not', `status ${response.status}`)
 
   const sha256 = crypto.createHash('sha256').update(image('rel2')).digest('hex')
   response = await get('/latest.img.xz.sha256')
+  assertEqual(response.headers.get('Location'), 'https://pimarchy.example.workers.dev/rel2.img.xz.sha256', 'the latest checksum redirects to the release\'s')
+  response = await get('/rel2.img.xz.sha256')
   assertEqual(await response.text(), `${sha256}  rel2.img.xz\n`, 'the checksum is served as sha256sum -c reads it')
-  response = await get('/latest.json')
+  response = await get('/rel2.json')
   const manifest = await response.json()
   assert(manifest.tag === 'rel2' && manifest.image === 'rel2.img.xz' && manifest.parts.length === parts('rel2').length,
     'the manifest is served with its tag')
@@ -135,9 +149,16 @@ const parts = (release) => Object.keys(files).filter((url) => url.includes(`/${r
   response = await get('/building.img.xz')
   assertEqual(response.status, 404, 'a release without a manifest is not found')
 
+  // GitHub failing to send the newest release's manifest is GitHub failing, not
+  // the release having none: the newest isn't passed over for an older one.
+  failing.add(`${base}/releases/download/rel2/pimarchy.json`)
+  response = await get('/latest.img.xz')
+  assertEqual(response.status, 502, 'GitHub failing reads as that, not as an older release being the newest')
+  failing.clear()
+
   // A part sent other than as asked ends the download with an error.
   ignoreRanges = true
-  response = await get('/latest.img.xz', { Range: 'bytes=350-450' })
+  response = await get('/rel2.img.xz', { Range: 'bytes=350-450' })
   let failed = false
   try {
     await bytes(response)
@@ -148,6 +169,7 @@ const parts = (release) => Object.keys(files).filter((url) => url.includes(`/${r
   ignoreRanges = false
 
   assertEqual((await get('/other.txt')).status, 404, 'other paths are not found')
+  assertEqual((await get('/..%2F..%2Fsomething.img.xz')).status, 404, 'a name with dots first reaches nothing')
   assertEqual((await get('/latest.img.xz', {}, 'POST')).status, 405, 'only GET and HEAD are answered')
 })().catch((error) => fail('the Worker test ran to its end', error.stack))
 JS

@@ -6,10 +6,13 @@
 // reading only the parts it covers, as a tool reading the xz index at the end
 // of the image does.
 //
-//   /latest.img.xz           the newest release's image
-//   /latest.img.xz.sha256    its checksum, as sha256sum -c and shasum -c read it
-//   /latest.json             its manifest (pimarchy.json), with its tag
-//   /<tag>.img.xz, ...       the same for the release with that tag
+//   /<tag>.img.xz            the image of the release with that tag
+//   /<tag>.img.xz.sha256     its checksum, naming the image as its download
+//                            does, as sha256sum -c and shasum -c read it
+//   /<tag>.json              its manifest (pimarchy.json), with its tag
+//   /latest.img.xz, ...      a redirect to the newest release's, so a client
+//                            that reads the size and then the bytes reads one
+//                            release's (balenaEtcher keeps the URL it lands on)
 //
 // Releases are found without GitHub's API, whose unauthenticated limit counts
 // every Worker sharing an address: the repository's releases.atom feed lists
@@ -23,7 +26,11 @@ const MANIFEST_TTL = 300
 // How many of the newest releases are tried for a manifest.
 const RELEASES_TRIED = 10
 
-const SAFE_NAME = /^[A-Za-z0-9._+-]+$/
+// Tags and file names start with a letter or digit: no "." or ".." can make a
+// download URL reach past a release's assets.
+const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/
+// GitHub asks every client to name itself.
+const HEADERS = { 'User-Agent': 'pimarchy-download-worker' }
 
 // The tags in the repository's releases.atom feed, newest first.
 export function tagsFromFeed(xml, repo) {
@@ -97,9 +104,12 @@ function downloadUrl(repo, tag, name) {
   return `${GITHUB}/${repo}/releases/download/${encodeURIComponent(tag)}/${name}`
 }
 
+// The text at url, cached for ttl seconds; null for a 404. Any other failure
+// throws, so that GitHub having trouble reads as that, not as a missing file.
 async function cachedText(url, ttl) {
-  const response = await fetch(url, { cf: { cacheTtl: ttl, cacheEverything: true } })
-  if (!response.ok) return null
+  const response = await fetch(url, { headers: HEADERS, cf: { cacheTtl: ttl, cacheEverything: true } })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`GitHub answered ${response.status} for ${url}`)
   return response.text()
 }
 
@@ -139,7 +149,7 @@ async function pump(repo, tag, manifest, start, end, writable) {
     for (const slice of slices(manifest.parts, start, end)) {
       const whole = slice.from === 0 && slice.to === slice.size - 1
       const response = await fetch(downloadUrl(repo, tag, slice.name), {
-        headers: whole ? {} : { Range: `bytes=${slice.from}-${slice.to}` },
+        headers: whole ? HEADERS : { ...HEADERS, Range: `bytes=${slice.from}-${slice.to}` },
       })
       const length = Number(response.headers.get('Content-Length'))
       const ranged = response.status === 206 &&
@@ -166,6 +176,8 @@ const HELP = (repo) => `Pimarchy images from https://github.com/${repo}/releases
 /latest.json            its manifest
 /<tag>.img.xz           a release's image by its tag (and .sha256, .json)
 
+The latest ones redirect to the newest release's own.
+
 On macOS and Linux, pi/flash in the repository writes it to a card and fills in pimarchy.txt.
 `
 
@@ -182,7 +194,7 @@ export async function handle(request, env, ctx) {
   }
   if (path === '/') return text(200, request.method === 'HEAD' ? null : HELP(repo))
 
-  const match = /^\/([A-Za-z0-9._+-]+?)(\.img\.xz|\.img\.xz\.sha256|\.json)$/.exec(path)
+  const match = /^\/([A-Za-z0-9][A-Za-z0-9._+-]*?)(\.img\.xz|\.img\.xz\.sha256|\.json)$/.exec(path)
   if (!match) return text(404, 'No such file. / lists what this serves.\n')
   const [, name, kind] = match
 
@@ -194,6 +206,10 @@ export async function handle(request, env, ctx) {
   }
   if (!release) return text(404, `No release ${name === 'latest' ? 'has' : `${name} has`} a pimarchy.json manifest.\n`)
   const { tag, manifest } = release
+  if (name === 'latest') {
+    const location = new URL(`/${tag}${kind}`, request.url).toString()
+    return new Response(null, { status: 302, headers: { Location: location, 'Cache-Control': 'no-store' } })
+  }
   const body = (content) => (request.method === 'HEAD' ? null : content)
 
   if (kind === '.img.xz.sha256') return text(200, body(`${manifest.sha256}  ${manifest.image}\n`))
@@ -205,7 +221,8 @@ export async function handle(request, env, ctx) {
 
   const size = manifest.size
   const etag = `"${manifest.sha256}"`
-  let range = parseRange(request.headers.get('Range'), size)
+  // Only a GET takes a range; a HEAD describes the whole image.
+  let range = request.method === 'GET' ? parseRange(request.headers.get('Range'), size) : null
   const ifRange = request.headers.get('If-Range')
   if (ifRange && ifRange !== etag) range = null
   if (range === 'unsatisfiable') return text(416, 'That range is past the end of the image.\n', { 'Content-Range': `bytes */${size}` })
@@ -219,12 +236,16 @@ export async function handle(request, env, ctx) {
   }
   if (range) headers['Content-Range'] = `bytes ${start}-${end}/${size}`
   const status = range ? 206 : 200
-  if (request.method === 'HEAD') return new Response(null, { status, headers })
-
-  // A FixedLengthStream sends Content-Length, and fails a body of any other length.
-  const { readable, writable } = typeof FixedLengthStream === 'function'
-    ? new FixedLengthStream(end - start + 1)
-    : new TransformStream()
+  // A FixedLengthStream gives the response its Content-Length, and fails a body
+  // of any other length. The Workers runtime pipes fetch bodies into it without
+  // running JavaScript, so a long download costs no CPU time; elsewhere (in the
+  // tests) a TransformStream stands in.
+  const fixed = typeof FixedLengthStream === 'function'
+  if (request.method === 'HEAD') {
+    // The runtime sends a HEAD response's length from its body's, unread.
+    return new Response(fixed ? new FixedLengthStream(size).readable : null, { status, headers })
+  }
+  const { readable, writable } = fixed ? new FixedLengthStream(end - start + 1) : new TransformStream()
   const pumping = pump(repo, tag, manifest, start, end, writable)
   if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(pumping)
   return new Response(readable, { status, headers })

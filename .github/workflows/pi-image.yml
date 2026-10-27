@@ -148,7 +148,14 @@ jobs:
             echo "On macOS or Linux, one command writes it to a card you pick and fills in its \`pimarchy.txt\` for a Pi with no screen:"
             echo
             echo '```bash'
-            echo "curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/pi/flash -o flash && bash flash --release $tag"
+            # A fork's pi/flash still names this repository's releases unless told.
+            flash_repo=$(sed -n 's/^REPO=${PIMARCHY_REPO:-\(.*\)}$/\1/p' "$GITHUB_WORKSPACE/pi/flash")
+            if [[ $flash_repo == "$GITHUB_REPOSITORY" ]]; then
+              flash_env=""
+            else
+              flash_env="PIMARCHY_REPO=$GITHUB_REPOSITORY "
+            fi
+            echo "curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/pi/flash -o flash && ${flash_env}bash flash --release $tag"
             echo '```'
             echo
             if [[ -n $PI_DOWNLOAD_URL ]]; then

@@ -9,8 +9,9 @@
 # It asks its questions first, then streams the newest release's image straight
 # from GitHub onto the card: GitHub holds it in parts, since no release file may
 # reach 2 GiB, and they are joined on the way and checked against the image's
-# checksum. Only removable disks other than the ones this computer runs from
-# are offered, and one is written only after its name is typed back.
+# checksum. Only removable disks nothing on this computer uses are offered, one
+# is written only after its name is typed back, and it is looked up again just
+# before it is written, in case another disk has taken its name.
 #
 # macOS ships Bash 3.2 as /bin/bash, so this keeps to what 3.2 has: no
 # associative arrays, mapfile, ${var,,} or [[ -v ]], and an array that may be
@@ -20,14 +21,21 @@ set -euo pipefail
 
 REPO=${PIMARCHY_REPO:-TheLazyDevsInc/pimarchy}
 GITHUB=${PIMARCHY_GITHUB:-https://github.com}
-GITHUB_API=${PIMARCHY_GITHUB_API:-https://api.github.com}
 # Where the questions are read from: the terminal, even when this script is
-# piped into bash.
+# piped into bash. The tests name their own, and their own Linux tables below.
 TTY=${PIMARCHY_FLASH_TTY:-/dev/tty}
+MOUNTINFO=${PIMARCHY_FLASH_MOUNTINFO:-/proc/self/mountinfo}
+SWAPS=${PIMARCHY_FLASH_SWAPS:-/proc/swaps}
+SYSFS_BLOCK=${PIMARCHY_FLASH_SYSFS_BLOCK:-/sys/class/block}
 
+# The Pi's own rules for its settings (install/provisioning/setup-form.sh, and
+# pi/rpi-boot/headless), so nothing typed here is refused there, where nobody
+# would see it. pi-flash-test.sh checks the copies still match.
 USERNAME_PATTERN='^[a-z_][a-z0-9_-]*$'
+RESERVED_USERNAMES='^(root|bin|daemon|mail|ftp|http|nobody|dbus|systemd-coredump|systemd-network|systemd-oom|systemd-journal-remote|systemd-resolve|systemd-timesync|tss|uuidd|alpm|git|avahi|cups|cups-browsed|lp|_talkd|polkitd|rtkit|qemu|brltty|gluster|rpc|libvirt-qemu|pcscd|nvidia-persistenced|sddm)$'
 HOSTNAME_PATTERN='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
-SAFE_NAME='^[A-Za-z0-9._+-]+$'
+KEYMAPS=" us uk dvorak colemak by be-latin1 bg-cp1251 croat cz dk-latin1 nl et fi fr cf fr_CH ge de de_CH-latin1 gr il hu is-latin1 ie it jp106 kazakh kyrgyz lv lt mk-utf no-latin1 pl pt-latin1 br-abnt2 ro ru sr-latin sk-qwertz slovene es la-latin1 sv-latin1 tj_alt-UTF8 trq ua "
+SAFE_NAME='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
 KEY_TYPES='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$'
 
 die() {
@@ -35,8 +43,9 @@ die() {
   exit 1
 }
 
+# Prints each argument as a line of its own, "" for a blank one.
 say() {
-  printf '%s\n' "$*" >&2
+  printf '%s\n' "$@" >&2
 }
 
 usage() {
@@ -117,21 +126,31 @@ human() {
 
 # ── The release ──────────────────────────────────────────────────────────────
 
-# The newest release that carries a pimarchy.json manifest (prereleases too).
-latest_tag() {
-  local releases tag
+# Fetches release $1's manifest to $2.
+fetch_manifest() {
+  curl -fsSL "$GITHUB/$REPO/releases/download/$1/pimarchy.json" -o "$2" 2>/dev/null
+}
 
-  releases=$(curl -fsSL "$GITHUB_API/repos/$REPO/releases?per_page=30") || die "cannot list $REPO's releases on GitHub"
-  tag=$(printf '%s\n' "$releases" |
-    grep -o '"browser_download_url": *"[^"]*/releases/download/[^"/]*/pimarchy\.json"' |
-    head -n 1 | sed 's|.*/releases/download/\([^"/]*\)/pimarchy\.json"$|\1|' || true)
-  [[ $tag =~ $SAFE_NAME ]] || die "no release of $REPO has a pimarchy.json manifest yet"
-  printf '%s\n' "$tag"
+# The newest release that carries a pimarchy.json manifest (prereleases too),
+# found as the download Worker finds it, through the releases feed rather than
+# GitHub's API; its manifest goes to $1.
+latest_tag() {
+  local feed tag
+
+  feed=$(curl -fsSL "$GITHUB/$REPO/releases.atom") || die "cannot read $REPO's releases from GitHub"
+  for tag in $(printf '%s\n' "$feed" | grep -o "href=\"[^\"]*/$REPO/releases/tag/[^\"]*\"" | sed 's|.*/releases/tag/||; s|"$||'); do
+    [[ $tag =~ $SAFE_NAME ]] || continue
+    if fetch_manifest "$tag" "$1"; then
+      printf '%s\n' "$tag"
+      return 0
+    fi
+  done
+  die "no recent release of $REPO has a pimarchy.json manifest yet"
 }
 
 # A field of the manifest (pi/release-manifest), which has one per line.
 manifest_field() {
-  sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}[[:space:]]*\$/\1/p" "$2" | head -n 1
+  sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}[[:space:]]*\$/\1/p" "$2" | sed -n 1p
 }
 
 # Reads the manifest at $1 into image, image_bytes, image_sha256, unpacked_bytes
@@ -169,33 +188,93 @@ pair() {
   fi
 }
 
-# Whether Linux uses disk $1 for itself: a partition mounted where the system
-# lives, swap, or a volume (LVM, RAID, encryption) built on it.
-linux_disk_busy() {
-  local line type mountpoint
+# Disk $1 and everything on it, as lsblk -P lists them: NAME, TYPE and the
+# device numbers (MAJ:MIN, or MAJ_MIN from some versions of lsblk).
+linux_tree() {
+  lsblk -npP -o NAME,TYPE,MAJ:MIN "$1" 2>/dev/null
+}
 
+# Where anything on disk $1 is mounted, one mount point a line (as the kernel
+# escapes them). The kernel's own table is read rather than lsblk's MOUNTPOINT,
+# which shows one mount of each device: a mount is matched by its device
+# numbers, which holds for Raspberry Pi OS's /dev/root, or by its source, which
+# holds for btrfs. Fails if lsblk can't list the disk.
+linux_mounts() {
+  local tree line names=" " numbers=" " number id parent root mountpoint rest source
+
+  tree=$(linux_tree "$1") || return 1
   while IFS= read -r line; do
+    names+="$(pair NAME "$line") "
+    number=$(pair MAJ:MIN "$line")
+    numbers+="${number:-$(pair MAJ_MIN "$line")} "
+  done <<<"$tree"
+  # ID PARENT MAJ:MIN ROOT MOUNTPOINT OPTIONS [OPTIONAL...] - TYPE SOURCE OPTIONS
+  while read -r id parent number root mountpoint rest; do
+    source=${rest#* - }
+    source=${source#* }
+    source=${source%% *}
+    if [[ $numbers == *" $number "* || $names == *" $source "* ]]; then
+      printf '%s\n' "$mountpoint"
+    fi
+  done <"$MOUNTINFO"
+}
+
+# Why Linux can't spare disk $1, if it can't: a volume (LVM, encryption, RAID)
+# built on it, swap on it, or a mount anywhere but where removable media are
+# mounted. A disk lsblk can't list is not spared either.
+linux_disk_in_use() {
+  local tree line name type holder mounts mountpoint source rest
+
+  tree=$(linux_tree "$1") || {
+    echo "lsblk cannot list what is on it"
+    return 0
+  }
+  while IFS= read -r line; do
+    name=$(pair NAME "$line")
     type=$(pair TYPE "$line")
-    mountpoint=$(pair MOUNTPOINT "$line")
-    case $type in
-      lvm | crypt | raid* | md | dm | mpath) return 0 ;;
-    esac
+    if [[ $type != "disk" && $type != "part" ]]; then
+      echo "a $type volume is on it"
+      return 0
+    fi
+    for holder in "$SYSFS_BLOCK/${name##*/}/holders"/*; do
+      if [[ -e $holder ]]; then
+        echo "${holder##*/} is built on ${name##*/}"
+        return 0
+      fi
+    done
+  done <<<"$tree"
+  mounts=$(linux_mounts "$1") || {
+    echo "lsblk cannot list what is on it"
+    return 0
+  }
+  while IFS= read -r mountpoint; do
     case $mountpoint in
-      / | /boot | /boot/* | /efi | /efi/* | /home | /home/* | /usr | /usr/* | /var | /var/* | /etc | /opt | /opt/* | \
-        /srv | /srv/* | /nix | /nix/* | /snap | /snap/* | /root | "[SWAP]")
+      "" | /media/* | /run/media/* | /mnt/*) ;;
+      *)
+        echo "it is mounted at $mountpoint"
         return 0
         ;;
     esac
-  done < <(lsblk -lnpP -o NAME,TYPE,MOUNTPOINT "$1")
+  done <<<"$mounts"
+  if [[ -r $SWAPS ]]; then
+    while read -r source rest; do
+      if [[ $tree == *"NAME=\"$source\""* ]]; then
+        echo "it holds swap"
+        return 0
+      fi
+    done < <(sed 1d "$SWAPS")
+  fi
   return 1
 }
 
 # The disks a card can be: one line each, "DEVICE BYTES DESCRIPTION". Linux
-# offers a whole disk that is removable, hot-pluggable, on USB or an SD slot,
-# not read-only, holds media, and that the system doesn't use.
+# offers a whole disk that is removable, hot-pluggable or on USB, or a card in
+# an SD slot (not eMMC soldered to the board), writable, holding media, and
+# that nothing on this computer uses; it says which it leaves out, and why.
 linux_disks() {
-  local line name bytes removable hotplug transport type readonly model
+  local list line name bytes removable hotplug transport type readonly model reason
 
+  list=$(lsblk -dnpbP -o NAME,SIZE,RM,HOTPLUG,TRAN,TYPE,RO,MODEL) || die "lsblk cannot list the disks"
   while IFS= read -r line; do
     name=$(pair NAME "$line")
     bytes=$(pair SIZE "$line")
@@ -206,23 +285,29 @@ linux_disks() {
     readonly=$(pair RO "$line")
     model=$(pair MODEL "$line")
     [[ $type == "disk" && $readonly == "0" && $bytes =~ ^[1-9][0-9]*$ ]] || continue
-    [[ $name != *boot[0-9] && $name != *rpmb ]] || continue
-    if [[ $removable == "1" || $hotplug == "1" || $transport == "usb" || $transport == "mmc" || $name =~ ^/dev/mmcblk[0-9]+$ ]]; then
-      linux_disk_busy "$name" && continue
-      printf '%s %s %s\n' "$name" "$bytes" "${model:-${transport:-disk}}"
+    if [[ $name =~ ^/dev/mmcblk[0-9]+$ ]]; then
+      [[ $(cat "$SYSFS_BLOCK/${name##*/}/device/type" 2>/dev/null) == "SD" ]] || continue
+      model=${model:-SD card}
+    elif [[ $removable != "1" && $hotplug != "1" && $transport != "usb" ]]; then
+      continue
     fi
-  done < <(lsblk -dnpbP -o NAME,SIZE,RM,HOTPLUG,TRAN,TYPE,RO,MODEL)
+    if reason=$(linux_disk_in_use "$name"); then
+      say "Leaving out $name ($(human "$bytes"), ${model:-disk}): $reason."
+      continue
+    fi
+    printf '%s %s %s\n' "$name" "$bytes" "${model:-disk}"
+  done <<<"$list"
 }
 
 # The physical disk the volume mounted at / lives on, which macOS names as its
 # APFS physical store.
 macos_system_disk() {
-  diskutil info / | sed -n 's/^[[:space:]]*APFS Physical Store:[[:space:]]*\(disk[0-9]*\).*/\1/p' | head -n 1
+  diskutil info / | sed -n 's/^[[:space:]]*APFS Physical Store:[[:space:]]*\(disk[0-9]*\).*/\1/p' | sed -n 1p
 }
 
 # A field of diskutil info's output for disk $2.
 macos_field() {
-  printf '%s\n' "$2" | sed -n "s/^[[:space:]]*$1:[[:space:]]*//p" | head -n 1
+  printf '%s\n' "$2" | sed -n "s/^[[:space:]]*$1:[[:space:]]*//p" | sed -n 1p
 }
 
 # macOS offers a whole physical disk that is external, or removable in the
@@ -287,6 +372,20 @@ choose_disk() {
   disk_name=${names[choice - 1]}
 }
 
+# Dies unless the chosen disk is still on offer as it was: a card pulled since
+# could have given its name to another disk, which must not be written.
+recheck_disk() {
+  local device bytes name
+
+  while read -r device bytes name; do
+    if [[ $device == "$disk" ]]; then
+      [[ $bytes == "$disk_bytes" && $name == "$disk_name" ]] && return 0
+      break
+    fi
+  done < <("${OS}_disks" 2>/dev/null)
+  die "$disk is no longer the $(human "$disk_bytes") $disk_name chosen, so nothing was written: run this again"
+}
+
 # ── Questions ────────────────────────────────────────────────────────────────
 
 # Asks a question on the terminal: sets the variable named $1 to the answer,
@@ -302,6 +401,7 @@ ask() {
     printf '%s: ' "$2" >&2
   fi
   IFS= read -r _ask_reply <&3 || die "no answer to \"$2\""
+  _ask_reply=${_ask_reply%$'\r'}
   if [[ -z $_ask_reply ]]; then
     _ask_reply=$_ask_default
   fi
@@ -314,6 +414,7 @@ ask_secret() {
 
   printf '%s: ' "$2" >&2
   IFS= read -r -s _ask_reply <&3 || die "no answer to \"$2\""
+  _ask_reply=${_ask_reply%$'\r'}
   printf '\n' >&2
   printf -v "$1" '%s' "$_ask_reply"
 }
@@ -426,7 +527,11 @@ print "\$6\$$salt\$$out\n";
 password_hash() {
   local hash
 
-  hash=$(printf '%s\n' "$1" | openssl passwd -6 -stdin 2>/dev/null) || hash=""
+  hash=""
+  # openssl passwd -stdin reads 256 bytes of a password at most.
+  if (( $(byte_length "$1") <= 256 )); then
+    hash=$(printf '%s\n' "$1" | openssl passwd -6 -stdin 2>/dev/null) || hash=""
+  fi
   if [[ ! $hash =~ ^\$6\$[^:[:space:]]+$ ]] && command -v perl >/dev/null 2>&1; then
     hash=$(printf '%s\n' "$1" | perl -e "$SHA512_CRYPT" 2>/dev/null) || hash=""
   fi
@@ -436,17 +541,36 @@ password_hash() {
 
 # Asks what pimarchy.txt should say, before anything is written, and keeps the
 # answers as the settings array of KEY=value lines.
+# Whether $1 has a control character, which no setting may hold.
+has_control() {
+  local LC_ALL=C
+
+  [[ $1 == *[[:cntrl:]]* ]]
+}
+
+# Whether $1 is a username the Pi's owner setup takes.
+username_ok() {
+  [[ $1 =~ $USERNAME_PATTERN && ! $1 =~ $RESERVED_USERNAMES ]] && (( ${#1} <= 32 ))
+}
+
 ask_settings() {
   local value password confirm key_file key country default_user
 
   settings=()
   say "" "The Pi sets itself up from these on its first boot. Leave the Wi-Fi name empty on Ethernet."
-  ask value "Wi-Fi network name" ""
+  while true; do
+    ask value "Wi-Fi network name" ""
+    if ! has_control "$value" && (( $(byte_length "$value") <= 32 )); then
+      break
+    fi
+    say "A network's name has 32 characters at most."
+  done
   if [[ -n $value ]]; then
     settings+=("WIFI_SSID=$value")
     while true; do
       ask_secret password "Wi-Fi password (empty for an open network)"
-      if [[ -z $password ]] || (( $(byte_length "$password") >= 8 && $(byte_length "$password") <= 63 )); then
+      if [[ -z $password || $password =~ ^[0-9A-Fa-f]{64}$ ]] ||
+        { ! has_control "$password" && (( $(byte_length "$password") >= 8 && $(byte_length "$password") <= 63 )); }; then
         break
       fi
       say "A Wi-Fi password has 8 to 63 characters."
@@ -455,24 +579,27 @@ ask_settings() {
     country=$(local_country)
     while true; do
       ask value "Wi-Fi country code, such as US, GB or DE" "$country"
-      [[ $value =~ ^[A-Za-z]{2}$ ]] && break
+      value=$(printf '%s' "$value" | tr '[:lower:]' '[:upper:]')
+      # The radio rules call the United Kingdom GB.
+      [[ $value == "UK" ]] && value=GB
+      [[ $value =~ ^[A-Z]{2}$ ]] && break
       say "Two letters, such as US."
     done
     settings+=("WIFI_COUNTRY=$value")
   fi
 
   default_user=$(id -un | tr '[:upper:]' '[:lower:]')
-  [[ $default_user =~ $USERNAME_PATTERN && $default_user != "root" ]] || default_user=""
+  username_ok "$default_user" || default_user=""
   while true; do
     ask value "Username on the Pi" "$default_user"
-    [[ $value =~ $USERNAME_PATTERN && $value != "root" ]] && break
-    say "Lowercase letters, digits, - and _, starting with a letter."
+    username_ok "$value" && break
+    say "Lowercase letters, digits, - and _, starting with a letter, and not a system account's name."
   done
   settings+=("USERNAME=$value")
   while true; do
     ask_secret password "Password for it (and for root)"
     ask_secret confirm "The password again"
-    if [[ -n $password && $password == "$confirm" ]]; then
+    if [[ -n $password && $password == "$confirm" ]] && ! has_control "$password"; then
       break
     fi
     say "The passwords are empty or differ."
@@ -484,9 +611,16 @@ ask_settings() {
   else
     settings+=("PASSWORD=$password")
   fi
-  ask value "Your name, for git (optional)" "$(git config --global user.name 2>/dev/null || true)"
+  while true; do
+    ask value "Your name, for git (optional)" "$(git config --global user.name 2>/dev/null || true)"
+    [[ $value != *:* ]] && ! has_control "$value" && break
+    say "A name without colons."
+  done
   settings+=("FULL_NAME=$value")
-  ask value "Your email, for git (optional)" "$(git config --global user.email 2>/dev/null || true)"
+  while true; do
+    ask value "Your email, for git (optional)" "$(git config --global user.email 2>/dev/null || true)"
+    ! has_control "$value" && break
+  done
   settings+=("EMAIL=$value")
 
   while true; do
@@ -495,15 +629,27 @@ ask_settings() {
     say "Letters, digits and dashes, starting and ending with a letter or digit."
   done
   settings+=("HOSTNAME=$value")
-  ask value "Timezone" "$(local_timezone)"
+  while true; do
+    ask value "Timezone, such as Europe/London" "$(local_timezone)"
+    [[ -z $value || $value =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] && break
+    say "A timezone's name, such as America/New_York."
+  done
   settings+=("TIMEZONE=$value")
-  ask value "Keyboard layout, such as us, uk, de or fr" "us"
+  while true; do
+    ask value "Keyboard layout, such as us, uk, de or fr" "us"
+    [[ $value == "gb" ]] && value=uk
+    [[ $KEYMAPS == *" $value "* ]] && break
+    say "One of:$KEYMAPS"
+  done
   settings+=("KEYBOARD=$value")
 
   key_file=$(local_ssh_key)
   if [[ -n $key_file ]] && yes_or_no "Let ${key_file/#$HOME/\~} log in over SSH (password logins then go off)" "yes"; then
     IFS= read -r key <"$key_file" || true
-    [[ ${key%%[[:space:]]*} =~ $KEY_TYPES ]] || die "$key_file is not an SSH public key"
+    # A key saved on Windows ends in a CR.
+    key=${key%$'\r'}
+    key=${key%"${key##*[![:space:]]}"}
+    [[ ${key%%[[:space:]]*} =~ $KEY_TYPES ]] && ! has_control "$key" || die "$key_file is not an SSH public key"
     settings+=("SSH_KEY=$key")
   fi
 }
@@ -540,20 +686,35 @@ confirm_disk() {
   [[ $typed == "${disk##*/}" ]] || die "nothing was written"
 }
 
+# Unmounts everything on the card (a desktop mounts a card when it goes in),
+# and dies if anything stays mounted.
 unmount_disk() {
-  local line name mountpoint
+  local tree line mounts tries
 
   if [[ $OS == "macos" ]]; then
     diskutil unmountDisk "$disk" >/dev/null || die "macOS would not unmount $disk; close what uses it and run this again"
     return 0
   fi
-  while IFS= read -r line; do
-    name=$(pair NAME "$line")
-    mountpoint=$(pair MOUNTPOINT "$line")
-    if [[ -n $mountpoint ]]; then
-      as_root umount "$name" || die "cannot unmount $name from $mountpoint"
-    fi
-  done < <(lsblk -lnpP -o NAME,MOUNTPOINT "$disk")
+  tree=$(linux_tree "$disk") || die "lsblk cannot list what is on $disk"
+  for tries in 1 2 3; do
+    mounts=$(linux_mounts "$disk") || die "lsblk cannot list what is on $disk"
+    [[ -n $mounts ]] || return 0
+    while IFS= read -r line; do
+      as_root umount "$(pair NAME "$line")" 2>/dev/null || true
+    done <<<"$tree"
+  done
+  mounts=$(linux_mounts "$disk") || die "lsblk cannot list what is on $disk"
+  [[ -z $mounts ]] || die "$disk stays mounted at $(printf '%s\n' "$mounts" | tr '\n' ' ')so nothing was written: unmount it and run this again"
+}
+
+# Whether $1 is still a disk's device node: a block device on Linux, the raw
+# character device on macOS.
+is_device() {
+  if [[ $OS == "macos" ]]; then
+    [[ -c $1 ]]
+  else
+    [[ -b $1 ]]
+  fi
 }
 
 # Streams the parts from GitHub, joined, through xz onto the card, and checks
@@ -570,18 +731,20 @@ write_image() {
     # The raw device skips the buffer cache, and writes several times faster.
     target=/dev/r${disk#/dev/}
   else
-    dd_options=(conv=fsync)
+    # A device that went away since must not come back as a file dd makes.
+    dd_options=(conv=fsync,nocreat)
   fi
+  is_device "$target" || die "$target is gone, so nothing was written"
 
   read -r -a unpack <<<"$(decompressor)"
   mkfifo "$tmp/sum.fifo"
   sha256 <"$tmp/sum.fifo" >"$tmp/sum" &
   local sum_pid=$!
   say "" "Writing $image to $disk: $(human "$image_bytes") to download, $(human "$unpacked_bytes") on the card."
-  if ! curl -fL --progress-bar ${urls[@]+"${urls[@]}"} | tee "$tmp/sum.fifo" | "${unpack[@]}" |
+  if ! curl -fL --fail-early --progress-bar ${urls[@]+"${urls[@]}"} | tee "$tmp/sum.fifo" | "${unpack[@]}" |
     as_root dd of="$target" bs=4194304 ${dd_options[@]+"${dd_options[@]}"} 2>"$tmp/dd.log"; then
     wait "$sum_pid" || true
-    die "writing the card failed ($(tail -n 1 "$tmp/dd.log" 2>/dev/null)); the card won't boot until this runs to its end"
+    die "writing the card failed; the card won't boot until this runs to its end"
   fi
   wait "$sum_pid"
   sum=$(cat "$tmp/sum")
@@ -596,7 +759,7 @@ mount_boot() {
   if [[ $OS == "macos" ]]; then
     diskutil mountDisk "$disk" >/dev/null 2>&1 || true
     for tries in 1 2 3 4 5 6 7 8 9 10; do
-      mountpoint=$(diskutil info "${disk}s1" 2>/dev/null | sed -n 's/^[[:space:]]*Mount Point:[[:space:]]*//p' | head -n 1)
+      mountpoint=$(diskutil info "${disk}s1" 2>/dev/null | sed -n 's/^[[:space:]]*Mount Point:[[:space:]]*//p' | sed -n 1p)
       if [[ -n $mountpoint && -d $mountpoint ]]; then
         printf '%s' "$mountpoint"
         return 0
@@ -686,33 +849,35 @@ main() {
 
   OS=$(platform)
   need_tools
-  exec 3<"$TTY" 2>/dev/null || die "this asks its questions on a terminal; run it from one"
+  # The redirection silences only a failed open: on exec itself it would last.
+  { exec 3<"$TTY"; } 2>/dev/null || die "this asks its questions on a terminal; run it from one"
   boot_mount=""
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/pimarchy-flash.XXXXXX")
   trap cleanup EXIT
 
-  if [[ -z $tag ]]; then
-    tag=$(latest_tag)
-  fi
   manifest=$tmp/pimarchy.json
-  curl -fsSL "$GITHUB/$REPO/releases/download/$tag/pimarchy.json" -o "$manifest" ||
-    die "release $tag has no pimarchy.json manifest"
+  if [[ -z $tag ]]; then
+    tag=$(latest_tag "$manifest")
+  else
+    fetch_manifest "$tag" "$manifest" || die "release $tag has no pimarchy.json manifest"
+  fi
   read_manifest "$manifest"
   say "Pimarchy release $tag: $image"
 
-  choose_disk
-  (( disk_bytes >= unpacked_bytes )) ||
-    die "$disk holds $(human "$disk_bytes"), and the image needs $(human "$unpacked_bytes"): use a bigger card"
   settings=()
   if (( setup )); then
     ask_settings
   fi
+  choose_disk
+  (( disk_bytes >= unpacked_bytes )) ||
+    die "$disk holds $(human "$disk_bytes"), and the image needs $(human "$unpacked_bytes"): use a bigger card"
   confirm_disk
 
   if (( EUID != 0 )); then
     say "Writing a disk needs administrator rights; sudo may ask for your password."
     sudo -v || die "nothing was written"
   fi
+  recheck_disk
   unmount_disk
   write_image
 
@@ -738,6 +903,7 @@ settings_value() {
   done
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+# Piped into bash, there is no source file, and main runs too.
+if [[ ${BASH_SOURCE[0]:-$0} == "$0" ]]; then
   main "$@"
 fi

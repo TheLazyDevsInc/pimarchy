@@ -873,6 +873,24 @@ output=$(on aarch64-rpi headless 2>&1) || fail "headless sets up an open network
   fail "a password on a last line with no line end is blanked in place" "$(cat -A "$settings")"
 pass "an open network, a hashed password, password logins kept on, and a last line with no line end"
 
+# What pi/flash writes into pimarchy.txt reaches the Pi as it was typed: quotes,
+# backslashes, "=" and "#" in passwords, spaces at their ends, and non-ASCII.
+reset_headless
+wifi_password=' "q\\=#é" '
+password='"pa=ss#\\word"'
+bash -c 'source "$1"
+  settings=("WIFI_SSID=Home Net 5G" "WIFI_PASSWORD=$2" "WIFI_COUNTRY=GB" "USERNAME=ada" "PASSWORD=$3"
+    "FULL_NAME=Ada King" "EMAIL=ada@example.com" "HOSTNAME=pi400" "KEYBOARD=uk")
+  fill_settings "$4"' bash "$ROOT/pi/flash" "$wifi_password" "$password" "$settings" ||
+  fail "pi/flash fills in pimarchy.txt"
+output=$(on aarch64-rpi headless 2>&1) || fail "headless reads the pimarchy.txt pi/flash filled in" "$output"
+psk=$(sed -n 's/^psk=//p' "$profile")
+[[ $(sed -n 's/^PASSWORD=//p' "$provisioning/answers") == "$password" &&
+  $psk == "$(printf '%s' "$wifi_password" | sed 's/\\/\\\\/g; s/ /\\s/g')" &&
+  $(<"$status_file") != *Skipped* ]] ||
+  fail "the Pi gets the passwords pi/flash was given, as they were typed" "$(cat "$provisioning/answers" "$profile" "$status_file")"
+pass "what pi/flash writes into pimarchy.txt, quotes, backslashes, = and # in passwords included, reaches the Pi as typed"
+
 # What the owner form wouldn't take is skipped and reported, and changes
 # nothing: an account the image has, a zoneinfo file timedated doesn't list.
 # Lines it can't read could hold a password, so they are blanked too.
